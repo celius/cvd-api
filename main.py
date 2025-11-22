@@ -72,15 +72,14 @@ def root():
 
 @app.get("/cvd/{symbol}")
 def get_cvd(symbol: str):
-    """JSON endpoint - samme som før"""
+    """JSON endpoint"""
     return calculate_cvd(symbol.upper())
 
 @app.get("/html/{symbol}", response_class=HTMLResponse)
 def get_cvd_html(symbol: str):
-    """HTML endpoint - for Mode 7 crawler"""
+    """HTML endpoint for Mode 7 crawler"""
     data = calculate_cvd(symbol.upper())
     
-    # Velg emoji basert på signal
     emoji_map = {
         "STRONG BULLISH": "🟢",
         "BULLISH": "🟢",
@@ -98,61 +97,68 @@ def get_cvd_html(symbol: str):
         <meta charset="utf-8">
         <style>
             body 
-                font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Arial, sans-serif;
-                max-width: 800px;
-                margin: 40px auto;
+                font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+                background: #1a1a1a;
+                color: #e0e0e0;
                 padding: 20px;
-                background: #f5f5f5;
+                margin: 0;
             
             .container 
-                background: white;
-                border-radius: 8px;
+                max-width: 600px;
+                margin: 0 auto;
+                background: #2a2a2a;
                 padding: 30px;
-                box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+                border-radius: 12px;
+                box-shadow: 0 4px 6px rgba(0,0,0,0.3);
             
             h1 
-                color: #333;
-                margin-bottom: 10px;
+                color: #ffffff;
+                margin-top: 0;
+                font-size: 24px;
             
             .metric 
-                margin: 20px 0;
+                background: #1e3a1e;
                 padding: 15px;
-                background: #f9f9f9;
-                border-radius: 6px;
-                border-left: 4px solid #4CAF50;
+                margin: 15px 0;
+                border-radius: 8px;
+                border-left: 4px solid #4caf50;
             
             .metric.bearish 
+                background: #3a1e1e;
                 border-left-color: #f44336;
             
             .metric.neutral 
-                border-left-color: #9E9E9E;
+                background: #2a2a2a;
+                border-left-color: #757575;
             
             .label 
-                font-size: 14px;
-                color: #666;
-                font-weight: 600;
+                font-size: 12px;
+                color: #999;
                 text-transform: uppercase;
-                letter-spacing: 0.5px;
+                letter-spacing: 1px;
+                margin-bottom: 5px;
             
             .value 
-                font-size: 24px;
-                color: #333;
-                margin-top: 5px;
+                font-size: 20px;
                 font-weight: bold;
+                color: #ffffff;
             
             .signal 
-                font-size: 32px;
+                background: #2a2a2a;
                 padding: 20px;
-                text-align: center;
-                background: #f0f0f0;
-                border-radius: 8px;
                 margin: 20px 0;
+                border-radius: 8px;
+                font-size: 18px;
+                text-align: center;
+                font-weight: bold;
             
             .timestamp 
                 text-align: center;
-                color: #999;
+                color: #666;
                 font-size: 12px;
-                margin-top: 20px;
+                margin-top: 30px;
+                padding-top: 20px;
+                border-top: 1px solid #333;
             
         </style>
     </head>
