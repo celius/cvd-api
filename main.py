@@ -5,7 +5,7 @@ import aiohttp
 import asyncio
 from datetime import datetime, timezone
 
-app = FastAPI(title="CVD API v7.10 - OI Fixed", version="7.10")
+app = FastAPI(title="CVD API v7.11 - Nuanced Signals", version="7.11")
 
 app.add_middleware(
     CORSMiddleware,
@@ -29,55 +29,69 @@ async def fetch_url(session, url):
         print(f"Error fetching {url}: {e}")
     return None
 
-# --- CORE LOGIC ---
+# --- CORE LOGIC (8 States) ---
 def get_signal(price_ch, cvd_val, oi_ch=0):
     signal = "⚖️ Neutral"
     color = "#888"
 
-    if cvd_val > 0: # Spot Kjøper
-        if price_ch < -0.5: 
-            signal = "🦅 Accumulation" # Pris ned, Spot kjøper
-            color = "#00ccff"
-        elif price_ch > 0.5:
+    # PRICE UP (> 0.5%)
+    if price_ch > 0.5:
+        if cvd_val > 0: # Spot Buying
             if oi_ch > 0:
-                signal = "🚀 Bullish" # Alt opp
-                color = "#00ff9d"
+                signal = "🚀 Bullish (Strong)"
+                color = "#00ff9d" # Green
             else:
-                signal = "⚠️ Weak Rally"
-                color = "#ffa500"
-    elif cvd_val < 0: # Spot Selger
-        if price_ch > 0.5:
-            signal = "🩸 Distribution" # Pris opp, Spot selger
-            color = "#ff4d4d"
-        elif price_ch < -0.5:
+                signal = "⚠️ Bullish (Short Cover)" # Spot buys, but OI drops
+                color = "#ccffcc" # Pale Green
+        else: # Spot Selling (Divergence)
             if oi_ch > 0:
-                signal = "📉 Bearish"
-                color = "#ff0000"
+                signal = "🩸 Distribution (Into FOMO)" # Spot sells to new longs
+                color = "#ff4d4d" # Red
             else:
-                signal = "🔻 Selling"
-                color = "#ffcccc"
+                signal = "🩸 Distribution (Short Cover)" # Spot sells while shorts close
+                color = "#ffa500" # Orange
+
+    # PRICE DOWN (< -0.5%)
+    elif price_ch < -0.5:
+        if cvd_val > 0: # Spot Buying (Divergence)
+            if oi_ch > 0:
+                signal = "🦅 Accumulation (Absorbing)" # Spot buys against new shorts
+                color = "#00ccff" # Blue
+            else:
+                signal = "🦅 Accumulation (Capitulation)" # Spot buys liquidation wick
+                color = "#0099ff" # Darker Blue
+        else: # Spot Selling
+            if oi_ch > 0:
+                signal = "📉 Bearish (Aggressive)" # Spot sells + new shorts
+                color = "#ff0000" # Deep Red
+            else:
+                signal = "🔻 Bearish (Long Liq)" # Spot sells + longs closing
+                color = "#ffcccc" # Pale Red
+    
+    # CHOP / NEUTRAL
+    else:
+        if cvd_val > 0: 
+            signal = "🌱 Passive Buying"
+            color = "#ccffcc"
+        elif cvd_val < 0:
+            signal = "🍂 Passive Selling"
+            color = "#ffcccc"
+
     return signal, color
 
 async def get_oi_history_map(session, symbol, period, limit):
-    # Mapping logic for limit scaling
     oi_period = period
     req_limit = limit
-    
-    # Convert unsupported periods to '1d' and scale limit
     if period == '1w': 
         oi_period = '1d'
         req_limit = limit * 7 
     elif period == '1M': 
         oi_period = '1d'
         req_limit = limit * 30 
-
-    # Binance Limit Cap
     if req_limit > 499: req_limit = 499
     
-    # CORRECT URL STRUCTURE
     url = f"{DOMAIN_FUTURES}/futures/data/openInterestHist?symbol={symbol}&period={oi_period}&limit={req_limit}"
     data = await fetch_url(session, url)
-    
     oi_map = {}
     if data:
         for item in data:
@@ -88,53 +102,36 @@ async def get_oi_history_map(session, symbol, period, limit):
 
 def get_closest_oi(ts, oi_map):
     if not oi_map: return 0.0
-    # Exact match
     if ts in oi_map: return oi_map[ts]
-    
-    # Fuzzy match (Find closest timestamp)
-    # We limit lookahead/behind to avoid matching completely wrong data
-    # E.g. max diff 24h for daily, 1h for hourly
     keys = list(oi_map.keys())
     if not keys: return 0.0
-    
     closest_ts = min(keys, key=lambda k: abs(k - ts))
     return oi_map[closest_ts]
 
 async def get_kline_analysis(session, symbol, interval, limit):
-    # Spot Klines
     kline_url = f"{DOMAIN_SPOT}/api/v3/klines?symbol={symbol}&interval={interval}&limit={limit}"
     klines = await fetch_url(session, kline_url)
-    
-    # OI History
     oi_map = await get_oi_history_map(session, symbol, interval, limit)
-    
     rows = []
     
     if klines:
         prev_oi = 0
         processed_rows = []
-        
-        # Process forwards to calculate OI change correctly
         for i, k in enumerate(klines):
             ts = int(k[0])
             dt_obj = datetime.fromtimestamp(ts / 1000, tz=timezone.utc)
-            
             open_p = float(k[1])
             close_p = float(k[4])
-            vol_usdt = float(k[7])
-            buy_vol_usdt = float(k[10])
-            sell_vol_usdt = vol_usdt - buy_vol_usdt
+            buy_vol = float(k[10])
+            sell_vol = float(k[7]) - buy_vol
             
             price_ch = ((close_p - open_p) / open_p) * 100
-            cvd = buy_vol_usdt - sell_vol_usdt
-            
-            # Fuzzy OI Lookup
+            cvd = buy_vol - sell_vol
             oi_val = get_closest_oi(ts, oi_map)
             
             oi_ch_percent = 0.0
             if prev_oi > 0 and oi_val > 0:
                 oi_ch_percent = ((oi_val - prev_oi) / prev_oi) * 100
-            
             prev_oi = oi_val
 
             # Labels
@@ -147,24 +144,17 @@ async def get_kline_analysis(session, symbol, interval, limit):
             signal_txt, signal_col = get_signal(price_ch, cvd, oi_ch_percent)
             
             processed_rows.append({
-                "label": label,
-                "price_ch": price_ch,
-                "cvd": cvd,
-                "oi": oi_val,
-                "oi_ch": oi_ch_percent,
-                "signal": signal_txt,
-                "color": signal_col
+                "label": label, "price_ch": price_ch, "cvd": cvd,
+                "oi": oi_val, "oi_ch": oi_ch_percent,
+                "signal": signal_txt, "color": signal_col
             })
-            
         rows = list(reversed(processed_rows))
-        
     return rows
 
 def render_table_rows(rows):
     html = ""
     for r in rows:
         p_col = "#00ff9d" if r['price_ch'] >= 0 else "#ff4d4d"
-        
         if abs(r['cvd']) > 1_000_000: cvd_fmt = f"${r['cvd']/1_000_000:+.1f}M"
         else: cvd_fmt = f"${r['cvd']/1_000:+.0f}k"
         cvd_col = "#00ff9d" if r['cvd'] >= 0 else "#ff4d4d"
@@ -175,9 +165,7 @@ def render_table_rows(rows):
             oi_ch_fmt = f"({r['oi_ch']:+.1f}%)"
             oi_col = "#00ff9d" if r['oi_ch'] >= 0 else "#ff4d4d"
         else:
-            oi_fmt = "N/A"
-            oi_ch_fmt = ""
-            oi_col = "#666"
+            oi_fmt = "N/A"; oi_ch_fmt = ""; oi_col = "#666"
 
         html += f"""
         <tr style="border-bottom: 1px solid #222;">
@@ -198,50 +186,21 @@ def generate_html_page(symbol, monthly, weekly, daily, hourly):
     <div class="coin-container" style="margin-bottom: 60px; background: #111; padding: 20px; border-radius: 8px; border: 1px solid #333;">
         <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom: 20px;">
             <h1 style="margin: 0; font-size: 2em;">{symbol.replace('USDT','')} Analysis</h1>
-            <div style="font-size: 0.8em; color: #666;">v7.10 OI Fixed</div>
+            <div style="font-size: 0.8em; color: #666;">v7.11 Nuanced Signals</div>
         </div>
-        
-        <style>
-            table  width: 100%; border-collapse: collapse; font-size: 0.9em; margin-bottom: 30px; 
-            th  text-align: left; padding: 8px; border-bottom: 2px solid #444; color: #aaa; text-transform: uppercase; font-size: 0.8em; 
-        </style>
-
+        <style>table  width: 100%; border-collapse: collapse; font-size: 0.9em; margin-bottom: 30px;  th  text-align: left; padding: 8px; border-bottom: 2px solid #444; color: #aaa; text-transform: uppercase; font-size: 0.8em; </style>
         <h3 style="color: #00ccff; border-bottom: 1px solid #00ccff; padding-bottom: 5px;">⏱️ Siste 24 Timer (Hourly)</h3>
-        <table>
-            <tr><th width="15%">Tid</th><th width="15%">Pris %</th><th width="20%">Spot CVD</th><th width="25%">Open Interest</th><th width="25%">Signal</th></tr>
-            {render_table_rows(hourly)}
-        </table>
-
+        <table><tr><th width="15%">Tid</th><th width="15%">Pris %</th><th width="20%">Spot CVD</th><th width="25%">Open Interest</th><th width="25%">Signal</th></tr>{render_table_rows(hourly)}</table>
         <h3 style="color: #00ccff; border-bottom: 1px solid #00ccff; padding-bottom: 5px; margin-top: 30px;">📅 Siste 14 Dager (Daily)</h3>
-        <table>
-            <tr><th>Dato</th><th>Pris %</th><th>Spot CVD</th><th>Open Interest</th><th>Signal</th></tr>
-            {render_table_rows(daily)}
-        </table>
-
+        <table><tr><th>Dato</th><th>Pris %</th><th>Spot CVD</th><th>Open Interest</th><th>Signal</th></tr>{render_table_rows(daily)}</table>
         <h3 style="color: #00ccff; border-bottom: 1px solid #00ccff; padding-bottom: 5px; margin-top: 30px;">📆 Siste 12 Uker (Weekly)</h3>
-        <table>
-            <tr><th>Uke</th><th>Pris %</th><th>Spot CVD</th><th>Open Interest</th><th>Signal</th></tr>
-            {render_table_rows(weekly)}
-        </table>
-
+        <table><tr><th>Uke</th><th>Pris %</th><th>Spot CVD</th><th>Open Interest</th><th>Signal</th></tr>{render_table_rows(weekly)}</table>
         <h3 style="color: #00ccff; border-bottom: 1px solid #00ccff; padding-bottom: 5px; margin-top: 30px;">🌕 Siste 3 Måneder (Monthly)</h3>
-        <table>
-            <tr><th>Måned</th><th>Pris %</th><th>Spot CVD</th><th>Open Interest</th><th>Signal</th></tr>
-            {render_table_rows(monthly)}
-        </table>
+        <table><tr><th>Måned</th><th>Pris %</th><th>Spot CVD</th><th>Open Interest</th><th>Signal</th></tr>{render_table_rows(monthly)}</table>
     </div>
     """
 
-BASE_HTML = """
-<html>
-<head>
-    <title>Mode 7: Table of Truth</title>
-    <style>
-        body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; background: #050505; color: #e0e0e0; padding: 20px; max-width: 1200px; margin: 0 auto; }
-    </style>
-</head>
-<body>
-"""
+BASE_HTML = """<html><head><title>Mode 7: Table of Truth</title><style>body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; background: #050505; color: #e0e0e0; padding: 20px; max-width: 1200px; margin: 0 auto; }</style></head><body>"""
 
 @app.get("/", response_class=HTMLResponse)
 async def dashboard():
