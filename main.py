@@ -74,7 +74,7 @@ def interpret_sentiment(global_ratio, top_acc_ratio, top_pos_ratio):
 
 # --- MAIN ENDPOINTS ---
 
-@app.get("/view/{ticker}")
+@app.get("/html/{ticker}")
 async def get_analysis(ticker: str):
     """
     Hovedfunksjonen som Mode 7 kaller. Returnerer HTML-tabell med ferdigtygget analyse.
