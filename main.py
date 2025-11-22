@@ -112,8 +112,8 @@ async def get_analysis(ticker: str):
 
         sentiment_text = interpret_sentiment(g_ratio, ta_ratio, tp_ratio)
 
-        # Bygg HTML
-        html_content = f\"\"\"
+        # Bygg HTML - bruker triple single quotes for aa unngaa JSON-escaping trobbel
+        html_content = f'''
         <html>
         <head>
             <style>
@@ -141,15 +141,15 @@ async def get_analysis(ticker: str):
                 <div style="display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px;">
                     <div>
                         <div class="metric">Retail (Global L/S)</div>
-                        <div class="val { 'bullish' if g_ratio > 1.0 else 'bearish' }">{g_ratio}</div>
+                        <div class="val {'bullish' if g_ratio > 1.0 else 'bearish'}">{g_ratio}</div>
                     </div>
                     <div>
                         <div class="metric">Whale Accounts</div>
-                        <div class="val { 'bullish' if ta_ratio > 1.0 else 'bearish' }">{ta_ratio}</div>
+                        <div class="val {'bullish' if ta_ratio > 1.0 else 'bearish'}">{ta_ratio}</div>
                     </div>
                     <div>
                         <div class="metric">Whale Positions</div>
-                        <div class="val { 'bullish' if tp_ratio > 1.0 else 'bearish' }">{tp_ratio}</div>
+                        <div class="val {'bullish' if tp_ratio > 1.0 else 'bearish'}">{tp_ratio}</div>
                     </div>
                 </div>
             </div>
@@ -162,7 +162,7 @@ async def get_analysis(ticker: str):
                     <th>CVD (Spot Vol)</th>
                     <th>Signal</th>
                 </tr>
-        \"\"\"
+        '''
 
         cvd_cum = 0
         
@@ -188,21 +188,21 @@ async def get_analysis(ticker: str):
             else:
                 signal = "Spot Selger"
 
-            html_content += f\"\"\"
+            html_content += f'''
                 <tr class="{row_class}">
                     <td>{close_time}</td>
                     <td>${close_price:.2f}</td>
                     <td>{delta_str}</td>
                     <td>{signal}</td>
                 </tr>
-            \"\"\"
+            '''
 
-        html_content += \"\"\"
+        html_content += '''
             </table>
             <p style="color: #666; font-size: 0.8em; margin-top: 20px;">v8.0 - Retail vs Whale Edition</p>
         </body>
         </html>
-        \"\"\"
+        '''
         
         return HTMLResponse(content=html_content)
 
