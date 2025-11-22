@@ -80,123 +80,49 @@ def get_cvd_html(symbol: str):
     """HTML endpoint for Mode 7 crawler"""
     data = calculate_cvd(symbol.upper())
     
-    emoji_map = {
-        "STRONG BULLISH": "🟢",
-        "BULLISH": "🟢",
-        "NEUTRAL": "⚪",
-        "BEARISH": "🔴",
-        "STRONG BEARISH": "🔴"
-    }
-    emoji = emoji_map.get(data['signal'], "⚪")
+    emoji = "🟢" if "BULLISH" in data['signal'] else ("🔴" if "BEARISH" in data['signal'] else "⚪")
+    color = "green" if data['cvd_usd'] > 0 else "red"
     
-    html_content = f"""
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <title>{data['symbol']} - CVD Analysis</title>
-        <meta charset="utf-8">
-        <style>
-            body 
-                font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-                background: #1a1a1a;
-                color: #e0e0e0;
-                padding: 20px;
-                margin: 0;
-            
-            .container 
-                max-width: 600px;
-                margin: 0 auto;
-                background: #2a2a2a;
-                padding: 30px;
-                border-radius: 12px;
-                box-shadow: 0 4px 6px rgba(0,0,0,0.3);
-            
-            h1 
-                color: #ffffff;
-                margin-top: 0;
-                font-size: 24px;
-            
-            .metric 
-                background: #1e3a1e;
-                padding: 15px;
-                margin: 15px 0;
-                border-radius: 8px;
-                border-left: 4px solid #4caf50;
-            
-            .metric.bearish 
-                background: #3a1e1e;
-                border-left-color: #f44336;
-            
-            .metric.neutral 
-                background: #2a2a2a;
-                border-left-color: #757575;
-            
-            .label 
-                font-size: 12px;
-                color: #999;
-                text-transform: uppercase;
-                letter-spacing: 1px;
-                margin-bottom: 5px;
-            
-            .value 
-                font-size: 20px;
-                font-weight: bold;
-                color: #ffffff;
-            
-            .signal 
-                background: #2a2a2a;
-                padding: 20px;
-                margin: 20px 0;
-                border-radius: 8px;
-                font-size: 18px;
-                text-align: center;
-                font-weight: bold;
-            
-            .timestamp 
-                text-align: center;
-                color: #666;
-                font-size: 12px;
-                margin-top: 30px;
-                padding-top: 20px;
-                border-top: 1px solid #333;
-            
-        </style>
-    </head>
-    <body>
-        <div class="container">
-            <h1>{emoji} {data['symbol']} - Spot CVD Analysis</h1>
-            
-            <div class="signal">
-                {data['interpretation']}
-            </div>
-            
-            <div class="metric {'bearish' if data['cvd_usd'] < 0 else ''}">
-                <div class="label">Cumulative Volume Delta (CVD)</div>
-                <div class="value">${data['cvd_usd']:,.2f}</div>
-            </div>
-            
-            <div class="metric">
-                <div class="label">Buy Volume</div>
-                <div class="value">${data['buy_volume_usd']:,.2f} ({data['buy_percentage']}%)</div>
-            </div>
-            
-            <div class="metric">
-                <div class="label">Sell Volume</div>
-                <div class="value">${data['sell_volume_usd']:,.2f} ({100 - data['buy_percentage']:.1f}%)</div>
-            </div>
-            
-            <div class="metric neutral">
-                <div class="label">Data Window</div>
-                <div class="value">{data['trades_analyzed']} trades analyzed</div>
-            </div>
-            
-            <div class="timestamp">
-                Last updated: {data['timestamp']}<br>
-                Source: Binance Spot REST API
-            </div>
+    html = f"""<!DOCTYPE html>
+<html>
+<head>
+    <title>{data['symbol']} CVD Analysis</title>
+    <meta charset="utf-8">
+</head>
+<body style="font-family: Arial, sans-serif; max-width: 800px; margin: 40px auto; padding: 20px; background: #f5f5f5;">
+    <div style="background: white; border-radius: 8px; padding: 30px; box-shadow: 0 2px 8px rgba(0,0,0,0.1);">
+        <h1 style="color: #333; margin-bottom: 10px;">{emoji} {data['symbol']} - Spot CVD Analysis</h1>
+        
+        <div style="background: #e8f5e9; border-left: 4px solid #4caf50; padding: 15px; margin: 20px 0; border-radius: 4px;">
+            <strong>{data['interpretation']}</strong>
         </div>
-    </body>
-    </html>
-    """
+        
+        <div style="background: #fafafa; padding: 20px; margin: 15px 0; border-radius: 4px; border-left: 4px solid {color};">
+            <div style="color: #666; font-size: 14px; margin-bottom: 5px;">Cumulative Volume Delta (CVD)</div>
+            <div style="font-size: 32px; font-weight: bold; color: {color};">${data['cvd_usd']:,.2f}</div>
+        </div>
+        
+        <div style="background: #fafafa; padding: 20px; margin: 15px 0; border-radius: 4px;">
+            <div style="color: #666; font-size: 14px; margin-bottom: 5px;">Buy Volume</div>
+            <div style="font-size: 24px; font-weight: bold; color: #333;">${data['buy_volume_usd']:,.2f} ({data['buy_percentage']}%)</div>
+        </div>
+        
+        <div style="background: #fafafa; padding: 20px; margin: 15px 0; border-radius: 4px;">
+            <div style="color: #666; font-size: 14px; margin-bottom: 5px;">Sell Volume</div>
+            <div style="font-size: 24px; font-weight: bold; color: #333;">${data['sell_volume_usd']:,.2f} ({100 - data['buy_percentage']:.1f}%)</div>
+        </div>
+        
+        <div style="background: #fafafa; padding: 20px; margin: 15px 0; border-radius: 4px;">
+            <div style="color: #666; font-size: 14px; margin-bottom: 5px;">Data Window</div>
+            <div style="font-size: 18px; color: #333;">{data['trades_analyzed']} trades analyzed</div>
+        </div>
+        
+        <div style="color: #999; font-size: 12px; margin-top: 30px; padding-top: 20px; border-top: 1px solid #eee;">
+            Last updated: {data['timestamp']}<br>
+            Source: Binance Spot REST API
+        </div>
+    </div>
+</body>
+</html>"""
     
-    return html_content
+    return html
