@@ -1,11 +1,11 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 import aiohttp
 import asyncio
 from datetime import datetime, timezone
 
-app = FastAPI(title="CVD API v7.13 - Mode 7 Optimized", version="7.13")
+app = FastAPI(title="CVD API v8.0 - Retail vs Whale Sentiment", version="8.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -14,213 +14,198 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# --- CONFIG ---
 DOMAIN_SPOT = "https://api.binance.com"
 DOMAIN_FUTURES = "https://fapi.binance.com"
+LIMIT_KLINES = 500  # Nok data for beregninger
 
-async def fetch_url(session, url):
+# --- HJELPEFUNKSJONER ---
+
+async def fetch_url(session, url, params=None):
+    """Henter data asynkront og håndterer feil."""
     try:
-        async with session.get(url) as response:
-            if response.status == 200:
-                return await response.json()
+        async with session.get(url, params=params) as response:
+            if response.status != 200:
+                print(f"Error fetching {url}: {response.status}")
+                return None
+            return await response.json()
     except Exception as e:
-        print(f"Error fetching {url}: {e}")
-    return None
+        print(f"Exception fetching {url}: {e}")
+        return None
 
-# --- MODE 7 OPTIMIZED SIGNALS ---
-def get_signal(price_ch, cvd_val, oi_ch=0):
-    # Format: (Overskrift, Forklaring, Farge)
-    # Forklaringen er skrevet for å bli lest og forstått av en AI (eller menneske) som "Klartekst analyse".
-    
-    # PRIS OPP (> 0.5%)
-    if price_ch > 0.5:
-        if cvd_val > 0: 
-            if oi_ch > 0:
-                return "🚀 STERK OPPGANG (BULLISH)", "Pris OPP, Spot KJØPER, OI ØKER. Ekte kjøpspress driver prisen opp.", "#00ff9d"
-            else:
-                return "⚠️ SVAK OPPGANG (SHORT-COVER)", "Pris OPP, Spot KJØPER, OI FALLER. Oppgang drevet av shorts som lukkes (ikke nye penger).", "#ccffcc"
-        else: 
-            if oi_ch > 0:
-                return "🩸 DISTRIBUSJON (FOMO)", "Pris OPP, Spot SELGER, OI ØKER. Smart Money selger til nye retail-longs (Topp-signal).", "#ff4d4d"
-            else:
-                return "💸 DISTRIBUSJON (GEVINST)", "Pris OPP, Spot SELGER, OI FALLER. Smart Money tar gevinst mens shorts dekker seg inn.", "#ffa500"
+def format_number(num):
+    """Formaterer store tall til lesbart format (k, M, B)."""
+    if abs(num) >= 1_000_000_000:
+        return f"{num / 1_000_000_000:.2f}B"
+    if abs(num) >= 1_000_000:
+        return f"{num / 1_000_000:.2f}M"
+    if abs(num) >= 1_000:
+        return f"{num / 1_000:.2f}k"
+    return f"{num:.2f}"
 
-    # PRIS NED (< -0.5%)
-    elif price_ch < -0.5:
-        if cvd_val > 0: 
-            if oi_ch > 0:
-                return "🛡️ ABSORBERING (SQUEEZE-POTENSIAL)", "Pris NED, Spot KJØPER, OI ØKER. Smart Money kjøper imot aggressive shorts.", "#00ccff"
-            else:
-                return "🦅 AKKUMULERING (KAPITULASJON)", "Pris NED, Spot KJØPER, OI FALLER. Smart Money plukker bunnen fra longs som gir opp.", "#0099ff"
-        else: 
-            if oi_ch > 0:
-                return "📉 AGGRESSIVT SALG (BEARISH)", "Pris NED, Spot SELGER, OI ØKER. Sterkt salgspress og nye shorts driver prisen ned.", "#ff0000"
-            else:
-                return "🔥 TVANGSSALG (LONG LIQUIDATION)", "Pris NED, Spot SELGER, OI FALLER. Pris faller fordi longs må selge (Stop-loss/Liq).", "#ffcccc"
-    
-    # PRIS FLAT
-    else:
-        if cvd_val > 0: return "🌱 PASSIV AKKUMULERING", "Pris FLAT, Spot KJØPER. Hvaler samler rolig opp uten å flytte pris.", "#ccffcc"
-        elif cvd_val < 0: return "🍂 PASSIV DISTRIBUSJON", "Pris FLAT, Spot SELGER. Hvaler selger rolig ut uten å flytte pris.", "#ffcccc"
-        else: return "⚖️ NØYTRAL", "Ingen klar retning eller volum.", "#888"
-
-async def get_oi_history_map(session, symbol, period, limit):
-    oi_period = period
-    req_limit = limit
-    if period == '1w': 
-        oi_period = '1d'; req_limit = limit * 7 
-    elif period == '1M': 
-        oi_period = '1d'; req_limit = limit * 30 
-    if req_limit > 499: req_limit = 499
-    
-    url = f"{DOMAIN_FUTURES}/futures/data/openInterestHist?symbol={symbol}&period={oi_period}&limit={req_limit}"
-    data = await fetch_url(session, url)
-    oi_map = {}
-    if data:
-        for item in data:
-            oi_map[int(item['timestamp'])] = float(item['sumOpenInterestValue'])
-    return oi_map
-
-def get_closest_oi(ts, oi_map):
-    if not oi_map: return 0.0
-    if ts in oi_map: return oi_map[ts]
-    keys = list(oi_map.keys())
-    if not keys: return 0.0
-    closest_ts = min(keys, key=lambda k: abs(k - ts))
-    return oi_map[closest_ts]
-
-async def get_kline_analysis(session, symbol, interval, limit):
-    kline_url = f"{DOMAIN_SPOT}/api/v3/klines?symbol={symbol}&interval={interval}&limit={limit}"
-    klines = await fetch_url(session, kline_url)
-    oi_map = await get_oi_history_map(session, symbol, interval, limit)
-    rows = []
-    
-    if klines:
-        prev_oi = 0
-        processed_rows = []
-        for i, k in enumerate(klines):
-            ts = int(k[0])
-            dt_obj = datetime.fromtimestamp(ts / 1000, tz=timezone.utc)
-            open_p = float(k[1]); close_p = float(k[4])
-            buy_vol = float(k[10]); sell_vol = float(k[7]) - buy_vol
-            
-            price_ch = ((close_p - open_p) / open_p) * 100
-            cvd = buy_vol - sell_vol
-            oi_val = get_closest_oi(ts, oi_map)
-            
-            oi_ch_percent = 0.0
-            if prev_oi > 0 and oi_val > 0:
-                oi_ch_percent = ((oi_val - prev_oi) / prev_oi) * 100
-            prev_oi = oi_val
-
-            if interval == '15m': label = dt_obj.strftime("%H:%M")
-            elif interval == '1h': label = dt_obj.strftime("%H:00")
-            elif interval == '1d': label = dt_obj.strftime("%Y-%m-%d")
-            elif interval == '1w': label = f"Uke {dt_obj.strftime('%W')}"
-            elif interval == '1M': label = dt_obj.strftime("%B %Y")
-            else: label = str(ts)
-
-            head, desc, col = get_signal(price_ch, cvd, oi_ch_percent)
-            
-            processed_rows.append({
-                "label": label, "price_ch": price_ch, "cvd": cvd,
-                "oi": oi_val, "oi_ch": oi_ch_percent,
-                "s_head": head, "s_desc": desc, "color": col
-            })
-        rows = list(reversed(processed_rows))
-    return rows
-
-def render_table_rows(rows):
-    html = ""
-    for r in rows:
-        p_col = "#00ff9d" if r['price_ch'] >= 0 else "#ff4d4d"
-        if abs(r['cvd']) > 1_000_000: cvd_fmt = f"${r['cvd']/1_000_000:+.1f}M"
-        else: cvd_fmt = f"${r['cvd']/1_000:+.0f}k"
-        cvd_col = "#00ff9d" if r['cvd'] >= 0 else "#ff4d4d"
-        
-        if r['oi'] > 0:
-            if r['oi'] > 1_000_000_000: oi_fmt = f"${r['oi']/1_000_000_000:.1f}B"
-            else: oi_fmt = f"${r['oi']/1_000_000:.1f}M"
-            oi_ch_fmt = f"({r['oi_ch']:+.1f}%)"
-            oi_col = "#00ff9d" if r['oi_ch'] >= 0 else "#ff4d4d"
-        else: oi_fmt = "N/A"; oi_ch_fmt = ""; oi_col = "#666"
-
-        html += f"""
-        <tr style="border-bottom: 1px solid #222;">
-            <td style="padding: 8px; color: #aaa; font-size: 0.9em; white-space: nowrap;">{r['label']}</td>
-            <td style="padding: 8px; color: {p_col}; font-weight: bold;">{r['price_ch']:+.2f}%</td>
-            <td style="padding: 8px; color: {cvd_col}; font-family: monospace;">{cvd_fmt}</td>
-            <td style="padding: 8px; font-family: monospace;">
-                <span style="color: #eee;">{oi_fmt}</span> 
-                <span style="color: {oi_col}; font-size: 0.8em;">{oi_ch_fmt}</span>
-            </td>
-            <td style="padding: 8px;">
-                <div style="color: {r['color']}; font-weight: bold; font-size: 0.8em; text-transform: uppercase;">{r['s_head']}</div>
-                <div style="color: #888; font-size: 0.7em;">{r['s_desc']}</div>
-            </td>
-        </tr>
-        """
-    return html
-
-def generate_html_page(symbol, monthly, weekly, daily, hourly, min15):
-    return f"""
-    <div class="coin-container" style="margin-bottom: 60px; background: #111; padding: 20px; border-radius: 8px; border: 1px solid #333;">
-        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom: 20px;">
-            <h1 style="margin: 0; font-size: 2em;">{symbol.replace('USDT','')} Analysis</h1>
-            <div style="font-size: 0.8em; color: #666;">v7.13 Mode 7 Optimized</div>
-        </div>
-        <style>table  width: 100%; border-collapse: collapse; font-size: 0.9em; margin-bottom: 30px;  th  text-align: left; padding: 8px; border-bottom: 2px solid #444; color: #aaa; text-transform: uppercase; font-size: 0.7em; </style>
-        
-        <h3 style="color: #00ccff; border-bottom: 1px solid #00ccff; padding-bottom: 5px;">⚡ Siste 4 Timer (15-min Sniper)</h3>
-        <table><tr><th width="10%">Tid</th><th width="10%">Pris %</th><th width="15%">Spot CVD</th><th width="20%">Open Interest</th><th width="45%">Analyse</th></tr>{render_table_rows(min15)}</table>
-
-        <h3 style="color: #00ccff; border-bottom: 1px solid #00ccff; padding-bottom: 5px;">⏱️ Siste 24 Timer (Hourly)</h3>
-        <table><tr><th>Tid</th><th>Pris %</th><th>Spot CVD</th><th>Open Interest</th><th>Analyse</th></tr>{render_table_rows(hourly)}</table>
-
-        <h3 style="color: #00ccff; border-bottom: 1px solid #00ccff; padding-bottom: 5px;">📅 Siste 14 Dager (Daily)</h3>
-        <table><tr><th>Dato</th><th>Pris %</th><th>Spot CVD</th><th>Open Interest</th><th>Analyse</th></tr>{render_table_rows(daily)}</table>
-
-        <h3 style="color: #00ccff; border-bottom: 1px solid #00ccff; padding-bottom: 5px;">📆 Siste 24 Uker (Weekly)</h3>
-        <table><tr><th>Uke</th><th>Pris %</th><th>Spot CVD</th><th>Open Interest</th><th>Analyse</th></tr>{render_table_rows(weekly)}</table>
-
-        <h3 style="color: #00ccff; border-bottom: 1px solid #00ccff; padding-bottom: 5px;">🌕 Siste 6 Måneder (Monthly)</h3>
-        <table><tr><th>Måned</th><th>Pris %</th><th>Spot CVD</th><th>Open Interest</th><th>Analyse</th></tr>{render_table_rows(monthly)}</table>
-    </div>
+def interpret_sentiment(global_ratio, top_acc_ratio, top_pos_ratio):
     """
-
-BASE_HTML = """<html><head><title>Mode 7: Analysis</title><style>body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; background: #050505; color: #e0e0e0; padding: 20px; max-width: 1200px; margin: 0 auto; }</style></head><body>"""
-
-@app.get("/", response_class=HTMLResponse)
-async def dashboard():
-    symbols = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "DOGEUSDT"]
-    async with aiohttp.ClientSession() as session:
-        tasks = [fetch_coin_data(session, sym) for sym in symbols]
-        results = await asyncio.gather(*tasks)
-    html = BASE_HTML + "".join(results) + "</body></html>"
-    return html
-
-@app.get("/html/{symbol}", response_class=HTMLResponse)
-async def single_coin(symbol: str):
-    clean = symbol.upper()
-    if "USDT" not in clean: clean += "USDT"
-    async with aiohttp.ClientSession() as session:
-        html = BASE_HTML + await fetch_coin_data(session, clean) + "</body></html>"
-    return html
-
-async def fetch_coin_data(session, sym):
-    # 1. Monthly (6 mnd)
-    t_mon = get_kline_analysis(session, sym, "1M", 6)
-    # 2. Weekly (24 uker ~ 6 mnd)
-    t_wek = get_kline_analysis(session, sym, "1w", 24)
-    # 3. Daily (14 dager)
-    t_day = get_kline_analysis(session, sym, "1d", 14)
-    # 4. Hourly (24 timer)
-    t_hor = get_kline_analysis(session, sym, "1h", 24)
-    # 5. 15-Min (16 perioder = 4 timer)
-    t_min15 = get_kline_analysis(session, sym, "15m", 16)
+    Analyserer 'Hvem' som gjør hva.
+    - Global Ratio høy = Retail er Bullish (ofte contrarian signal hvis pris faller)
+    - Top Pos > Top Acc = Whales satser tungt (High Conviction)
+    """
+    signals = []
     
-    mon, wek, day, hor, min15 = await asyncio.gather(t_mon, t_wek, t_day, t_hor, t_min15)
-    return generate_html_page(sym, mon, wek, day, hor, min15)
+    # 1. Retail Sentiment
+    if global_ratio > 1.5:
+        signals.append("Retail er EKSTREMT BULLISH (Crowded Longs)")
+    elif global_ratio < 0.6:
+        signals.append("Retail er EKSTREMT BEARISH (Crowded Shorts)")
+        
+    # 2. Whale Conviction (Positions vs Accounts)
+    # Hvis posisjons-ratio er mye høyere enn konto-ratio, betyr det at de største whalene tar større veddemål enn de mindre whalene.
+    if top_pos_ratio > (top_acc_ratio * 1.1):
+        signals.append("Whales satser TUNG LONG (High Conviction)")
+    elif top_pos_ratio < (top_acc_ratio * 0.9):
+        signals.append("Whales satser TUNG SHORT (High Conviction)")
+        
+    # 3. Smart Money vs Retail Divergence
+    if global_ratio > 1.2 and top_pos_ratio < 0.9:
+        signals.append("⚠️ DIVERGENS: Retail kjøper, Whales selger (Smart Money Distribution)")
+    elif global_ratio < 0.8 and top_pos_ratio > 1.1:
+        signals.append("💎 DIVERGENS: Retail selger, Whales kjøper (Smart Money Accumulation)")
+        
+    return " + ".join(signals) if signals else "Ingen ekstrem divergens"
 
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+# --- MAIN ENDPOINTS ---
+
+@app.get("/view/{ticker}")
+async def get_analysis(ticker: str):
+    """
+    Hovedfunksjonen som Mode 7 kaller. Returnerer HTML-tabell med ferdigtygget analyse.
+    """
+    symbol = ticker.upper() + "USDT"
+    
+    async with aiohttp.ClientSession() as session:
+        # 1. Hent Spot Klines for CVD (Pris + Volum)
+        klines_url = f"{DOMAIN_SPOT}/api/v3/klines"
+        klines_params = {"symbol": symbol, "interval": "15m", "limit": 20} # Siste 5 timer
+        
+        # 2. Hent Sentiment Data (Futures)
+        # Merk: period="15m" for å matche klines
+        sentiment_params = {"symbol": symbol, "period": "15m", "limit": 1}
+        
+        task_klines = fetch_url(session, klines_url, klines_params)
+        task_global = fetch_url(session, f"{DOMAIN_FUTURES}/futures/data/globalLongShortAccountRatio", sentiment_params)
+        task_top_acc = fetch_url(session, f"{DOMAIN_FUTURES}/futures/data/topLongShortAccountRatio", sentiment_params)
+        task_top_pos = fetch_url(session, f"{DOMAIN_FUTURES}/futures/data/topLongShortPositionRatio", sentiment_params)
+        
+        klines, global_data, top_acc_data, top_pos_data = await asyncio.gather(task_klines, task_global, task_top_acc, task_top_pos)
+
+        if not klines or not isinstance(klines, list):
+            return HTMLResponse(content=f"<h1>Fant ingen data for {symbol}</h1>", status_code=404)
+
+        # --- BEREGN CVD & ANALYSE ---
+        
+        # Pakk ut sentiment data (tar nyeste verdi)
+        try:
+            g_ratio = float(global_data[0]['longShortRatio']) if global_data else 1.0
+            ta_ratio = float(top_acc_data[0]['longShortRatio']) if top_acc_data else 1.0
+            tp_ratio = float(top_pos_data[0]['longShortRatio']) if top_pos_data else 1.0
+        except:
+            g_ratio, ta_ratio, tp_ratio = 1.0, 1.0, 1.0
+
+        sentiment_text = interpret_sentiment(g_ratio, ta_ratio, tp_ratio)
+
+        # Bygg HTML
+        html_content = f"""
+        <html>
+        <head>
+            <style>
+                body  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; background: #191919; color: #e0e0e0; padding: 20px; 
+                h2  color: #fff; border-bottom: 1px solid #333; padding-bottom: 10px; 
+                .card  background: #2d2d2d; padding: 15px; border-radius: 8px; margin-bottom: 20px; border-left: 4px solid #2196F3; 
+                .metric  font-size: 0.9em; color: #aaa; 
+                .val  font-size: 1.1em; font-weight: bold; color: #fff; 
+                .bullish  color: #4CAF50; 
+                .bearish  color: #F44336; 
+                table  width: 100%; border-collapse: collapse; font-size: 0.85em; 
+                th  text-align: left; color: #888; padding: 8px; border-bottom: 1px solid #444; 
+                td  padding: 8px; border-bottom: 1px solid #333; 
+                .row-bull  background: rgba(76, 175, 80, 0.1); 
+                .row-bear  background: rgba(244, 67, 54, 0.1); 
+            </style>
+        </head>
+        <body>
+            <h2>🔭 Mode 7 X-Ray: {symbol}</h2>
+            
+            <div class="card">
+                <div style="font-size: 1.2em; margin-bottom: 10px;"><strong>🧠 Sentiment Analyse (NÅ):</strong></div>
+                <div style="color: #FFD700; font-size: 1.1em;">{sentiment_text}</div>
+                <br>
+                <div style="display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px;">
+                    <div>
+                        <div class="metric">Retail (Global L/S)</div>
+                        <div class="val { 'bullish' if g_ratio > 1.0 else 'bearish' }">{g_ratio}</div>
+                    </div>
+                    <div>
+                        <div class="metric">Whale Accounts</div>
+                        <div class="val { 'bullish' if ta_ratio > 1.0 else 'bearish' }">{ta_ratio}</div>
+                    </div>
+                    <div>
+                        <div class="metric">Whale Positions</div>
+                        <div class="val { 'bullish' if tp_ratio > 1.0 else 'bearish' }">{tp_ratio}</div>
+                    </div>
+                </div>
+            </div>
+
+            <h3>📊 Siste 5 Timer (15m Candles)</h3>
+            <table>
+                <tr>
+                    <th>Tid</th>
+                    <th>Pris</th>
+                    <th>CVD (Spot Vol)</th>
+                    <th>Signal</th>
+                </tr>
+        """
+
+        cvd_cum = 0
+        
+        # Vi itererer gjennom klines for å beregne Spot CVD
+        # Binance Kline Index: 0=OpenTime, 4=ClosePrice, 5=Vol, 9=TakerBuyBaseVol
+        for k in klines:
+            close_time = datetime.fromtimestamp(k[0] / 1000, timezone.utc).strftime('%H:%M')
+            close_price = float(k[4])
+            total_vol = float(k[5])
+            taker_buy_vol = float(k[9])
+            taker_sell_vol = total_vol - taker_buy_vol
+            
+            delta = taker_buy_vol - taker_sell_vol
+            cvd_cum += delta
+            
+            # Enkel fargekoding
+            row_class = "row-bull" if delta > 0 else "row-bear"
+            delta_str = f"{'+' if delta > 0 else ''}{format_number(delta)}"
+            
+            # Tolkning for tabell
+            if delta > 0:
+                signal = "Spot Kjøper"
+            else:
+                signal = "Spot Selger"
+
+            html_content += f"""
+                <tr class="{row_class}">
+                    <td>{close_time}</td>
+                    <td>${close_price:.2f}</td>
+                    <td>{delta_str}</td>
+                    <td>{signal}</td>
+                </tr>
+            """
+
+        html_content += """
+            </table>
+            <p style="color: #666; font-size: 0.8em; margin-top: 20px;">v8.0 - Retail vs Whale Edition</p>
+        </body>
+        </html>
+        """
+        
+        return HTMLResponse(content=html_content)
+
+@app.get("/")
+def read_root():
+    return {"Status": "CVD API v8.0 is Online", "Mode": "Retail vs Whale Sentiment"}
