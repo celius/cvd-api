@@ -6,7 +6,7 @@ import asyncio
 from datetime import datetime, timedelta, timezone
 import json
 
-app = FastAPI(title="CVD API v7.3 - Multi-Route Support", version="7.3")
+app = FastAPI(title="CVD API v7.4 - Trends Restored", version="7.4")
 
 app.add_middleware(
     CORSMiddleware,
@@ -33,6 +33,7 @@ async def get_oi_data(session, symbol):
     current_url = f"{BASE_URL_FUTURES}/openInterest?symbol={symbol}"
     current_data = await fetch_url(session, current_url)
     
+    # Hent historisk OI (24h siden)
     lookback = int((datetime.now(timezone.utc) - timedelta(hours=24)).timestamp() * 1000)
     hist_url = f"{BASE_URL_FUTURES}/openInterestHist?symbol={symbol}&period=5m&limit=1&startTime={lookback}"
     hist_data = await fetch_url(session, hist_url)
@@ -42,7 +43,6 @@ async def get_oi_data(session, symbol):
 
     if current_data and 'openInterest' in current_data:
         oi_val = float(current_data['openInterest'])
-        
         if hist_data and len(hist_data) > 0:
             past_oi = float(hist_data[0]['sumOpenInterest'])
             if past_oi > 0:
@@ -50,7 +50,31 @@ async def get_oi_data(session, symbol):
     
     return oi_val, oi_change
 
-def generate_html_card(symbol, spot_data, oi_val, oi_change):
+async def get_trend_data(session, symbol):
+    # Hent 90 dager med data (Daily candles)
+    # Limit 91 for å dekke 90 dager tilbake + i dag
+    url = f"{BASE_URL_SPOT}/klines?symbol={symbol}&interval=1d&limit=91"
+    data = await fetch_url(session, url)
+    
+    change_7d = 0.0
+    change_90d = 0.0
+    
+    if data and len(data) >= 90:
+        # data[index]: [time, open, high, low, close, ...]
+        current_close = float(data[-1][4]) # Siste candle (i dag)
+        
+        # Swing: 7 dager siden (indeks -8)
+        if len(data) >= 8:
+            price_7d = float(data[-8][4])
+            change_7d = ((current_close - price_7d) / price_7d) * 100
+            
+        # Macro: 90 dager siden (indeks 0)
+        price_90d = float(data[0][4])
+        change_90d = ((current_close - price_90d) / price_90d) * 100
+        
+    return change_7d, change_90d
+
+def generate_html_card(symbol, spot_data, oi_val, oi_change, change_7d, change_90d):
     if not spot_data:
         return f"<div class='card'><h2>{symbol}</h2><p>Ingen data funnet.</p></div>"
 
@@ -58,36 +82,46 @@ def generate_html_card(symbol, spot_data, oi_val, oi_change):
     change_24h = float(spot_data['priceChangePercent'])
     volume = float(spot_data['quoteVolume']) / 1_000_000 
     
-    price_class = "green" if change_24h >= 0 else "red"
-    oi_class = "green" if oi_change >= 0 else "red"
+    # Farger
+    c_24h = "green" if change_24h >= 0 else "red"
+    c_oi = "green" if oi_change >= 0 else "red"
+    c_7d = "green" if change_7d >= 0 else "red"
+    c_90d = "green" if change_90d >= 0 else "red"
 
     return f"""
     <div class="card">
         <div class="header">
             <span style="font-weight: bold; font-size: 1.2em;">{symbol.replace('USDT','')}</span>
-            <span class="{price_class} price">${price:,.2f}</span>
+            <span class="{c_24h} price">${price:,.2f}</span>
         </div>
         
-        <!-- SNIPER SECTION (FIRST) -->
+        <!-- 1. SNIPER (24h) -->
         <h2>1. Sniper (24h)</h2>
         <div class="metric">
-            <span class="label">Price Change 24h</span>
-            <span class="{price_class}">{change_24h:+.2f}%</span>
+            <span class="label">Price Change</span>
+            <span class="{c_24h}">{change_24h:+.2f}%</span>
         </div>
         <div class="metric">
-            <span class="label">OI Change 24h</span>
-            <span class="{oi_class}">{oi_change:+.2f}%</span>
+            <span class="label">OI Change</span>
+            <span class="{c_oi}">{oi_change:+.2f}%</span>
         </div>
         <div class="metric">
-            <span class="label">Volume 24h</span>
+            <span class="label">Volume</span>
             <span>${volume:,.1f}M</span>
         </div>
         
-        <!-- SWING SECTION -->
+        <!-- 2. SWING (7d) -->
         <h2 style="margin-top: 20px;">2. Swing (7d)</h2>
         <div class="metric">
-            <span class="label">Trend Status</span>
-            <span>Coming soon...</span>
+            <span class="label">Price Trend</span>
+            <span class="{c_7d}">{change_7d:+.2f}%</span>
+        </div>
+
+        <!-- 3. MACRO (90d) -->
+        <h2 style="margin-top: 20px;">3. Macro (90d)</h2>
+        <div class="metric">
+            <span class="label">Quarterly Performance</span>
+            <span class="{c_90d}">{change_90d:+.2f}%</span>
         </div>
     </div>
     """
@@ -128,12 +162,19 @@ async def dashboard():
         for sym in symbols:
             tasks.append(fetch_url(session, f"{BASE_URL_SPOT}/ticker/24hr?symbol={sym}"))
             tasks.append(get_oi_data(session, sym))
+            tasks.append(get_trend_data(session, sym))
         results = await asyncio.gather(*tasks)
     
     html_content = BASE_HTML_START
-    for i in range(0, len(results), 2):
-        sym = symbols[int(i/2)]
-        html_content += generate_html_card(sym, results[i], results[i+1][0], results[i+1][1])
+    # Vi henter 3 ting per symbol nå, så step er 3
+    for i in range(0, len(results), 3):
+        sym = symbols[int(i/3)]
+        # results[i] = spot, results[i+1] = oi, results[i+2] = trends
+        oi_val, oi_change = results[i+1]
+        ch_7d, ch_90d = results[i+2]
+        
+        html_content += generate_html_card(sym, results[i], oi_val, oi_change, ch_7d, ch_90d)
+    
     html_content += BASE_HTML_END
     return html_content
 
@@ -146,9 +187,10 @@ async def single_coin(symbol: str):
     async with aiohttp.ClientSession() as session:
         spot_data = await fetch_url(session, f"{BASE_URL_SPOT}/ticker/24hr?symbol={clean_symbol}")
         oi_val, oi_change = await get_oi_data(session, clean_symbol)
+        ch_7d, ch_90d = await get_trend_data(session, clean_symbol)
         
     html_content = BASE_HTML_START
-    html_content += generate_html_card(clean_symbol, spot_data, oi_val, oi_change)
+    html_content += generate_html_card(clean_symbol, spot_data, oi_val, oi_change, ch_7d, ch_90d)
     html_content += BASE_HTML_END
     return html_content
 
