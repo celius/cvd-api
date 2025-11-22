@@ -5,7 +5,7 @@ import aiohttp
 import asyncio
 from datetime import datetime, timedelta, timezone
 
-app = FastAPI(title="CVD API v6.2 - Full Spectrum", version="6.2")
+app = FastAPI(title="CVD API v7.0 - Smart Money Triad", version="7.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -14,164 +14,199 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-BASE_URL = "https://api.binance.com/api/v3/klines"
+BASE_URL_SPOT = "https://api.binance.com/api/v3/klines"
+BASE_URL_FUTURES = "https://fapi.binance.com/fapi/v1/openInterest?symbol=BTCUSDT"
 
-async def fetch_candles(session, symbol, interval, limit):
-    """Henter candles med pris og volum data."""
+async def fetch_spot_candles(session, symbol, interval, limit):
+    """Henter Spot data (Pris + Net Flow)."""
     params = {"symbol": symbol, "interval": interval, "limit": limit}
     try:
-        async with session.get(BASE_URL, params=params, timeout=10) as resp:
+        async with session.get(f"{BASE_URL_SPOT}/api/v3/klines", params=params, timeout=10) as resp:
             if resp.status != 200: return []
             data = await resp.json()
             processed = []
             for k in data:
-                close_price = float(k[4])
-                total_vol = float(k[7]) # Quote volume
-                buy_vol = float(k[10])  # Taker buy quote
-                sell_vol = total_vol - buy_vol
-                net_flow = buy_vol - sell_vol
-                processed.append({
-                    "time": k[0], 
-                    "price": close_price,
-                    "net_flow": net_flow
-                })
+                total_vol = float(k[7])
+                buy_vol = float(k[10])
+                net_flow = buy_vol - (total_vol - buy_vol)
+                processed.append({"time": k[0], "price": float(k[4]), "spot_cvd": net_flow})
             return processed
     except: return []
 
-def analyze_rhythm(usdt_data, usdc_data, weeks=12):
-    """Analyserer uke-for-uke rytme for USDT, USDC og NET."""
-    if not usdt_data: return []
+async def fetch_futures_oi(session, symbol, period, limit):
+    """Henter Open Interest Historikk."""
+    params = {"symbol": symbol, "period": period, "limit": limit}
+    try:
+        async with session.get(f"{BASE_URL_FUTURES}/fapi/v1/openInterestHist", params=params, timeout=10) as resp:
+            if resp.status != 200: return []
+            data = await resp.json()
+            return [{"time": d["timestamp"], "oi": float(d["sumOpenInterestValue"])} for d in data]
+    except: return []
+
+async def fetch_funding(session, symbol):
+    """Henter nåværende funding rate."""
+    try:
+        async with session.get(f"{BASE_URL_FUTURES}/fapi/v1/premiumIndex", params={"symbol": symbol}, timeout=10) as resp:
+            if resp.status != 200: return 0
+            data = await resp.json()
+            return float(data["lastFundingRate"])
+    except: return 0
+
+def analyze_period(spot_data, oi_data, chunk_size, label_func):
+    """Grupperer data i perioder (Uker/Dager/Timer) og analyserer Triad."""
+    if not spot_data: return []
     
-    rhythm = []
-    chunk_size = 42 # Ca 1 uke med 4h candles
+    # Synkroniser lengder (bruk korteste)
+    min_len = min(len(spot_data), len(oi_data))
+    spot_data = spot_data[-min_len:]
+    oi_data = oi_data[-min_len:]
     
-    recent_usdt = usdt_data[-(weeks*chunk_size):]
-    recent_usdc = usdc_data[-(weeks*chunk_size):] if usdc_data else []
+    chunks = [spot_data[i:i + chunk_size] for i in range(0, len(spot_data), chunk_size)]
+    oi_chunks = [oi_data[i:i + chunk_size] for i in range(0, len(oi_data), chunk_size)]
     
-    usdt_chunks = [recent_usdt[i:i + chunk_size] for i in range(0, len(recent_usdt), chunk_size)]
-    
-    for i, chunk in enumerate(usdt_chunks):
+    analysis = []
+    for i, chunk in enumerate(chunks):
         if not chunk: continue
         
+        # Spot Data
         start_price = chunk[0]['price']
         end_price = chunk[-1]['price']
-        price_change_pct = ((end_price - start_price) / start_price) * 100
+        price_change = ((end_price - start_price) / start_price) * 100
+        net_cvd = sum(d['spot_cvd'] for d in chunk)
         
-        flow_usdt = sum(d['net_flow'] for d in chunk)
+        # OI Data
+        start_oi = oi_chunks[i][0]['oi'] if i < len(oi_chunks) and oi_chunks[i] else 0
+        end_oi = oi_chunks[i][-1]['oi'] if i < len(oi_chunks) and oi_chunks[i] else 0
+        oi_change = ((end_oi - start_oi) / start_oi) * 100 if start_oi else 0
         
-        flow_usdc = 0
-        if recent_usdc:
-            start_idx = i * chunk_size
-            end_idx = start_idx + len(chunk)
-            if start_idx < len(recent_usdc):
-                usdc_chunk = recent_usdc[start_idx:end_idx]
-                flow_usdc = sum(d['net_flow'] for d in usdc_chunk)
+        # Signal Logic (Triad)
+        signal = "Neutral"
+        color = "gray"
         
-        flow_net = flow_usdt + flow_usdc
-        
-        # Phase Detection Logic (Basert på NET flow)
-        phase = "Neutral"
-        phase_color = "gray"
-        
-        if flow_net > 0 and price_change_pct < -2:
-            phase = "🦅 ABSORPTION"
-            phase_color = "#1b5e20" # Dark Green
-        elif flow_net > 0 and price_change_pct > 0:
-            phase = "🚀 MARKUP"
-            phase_color = "#4caf50" # Green
-        elif flow_net < 0 and price_change_pct > 2:
-            phase = "⚠️ DISTRIBUTION"
-            phase_color = "#b71c1c" # Dark Red
-        elif flow_net < 0 and price_change_pct < 0:
-            phase = "🩸 CAPITULATION" 
-            phase_color = "#f44336" # Red
-        elif flow_net > 0:
-             phase = "🌱 ACCUMULATION"
-             phase_color = "#81c784"
+        # 1. Squeeze Setup (Pris opp + CVD opp + OI opp)
+        if price_change > 0 and net_cvd > 0 and oi_change > 0:
+            signal = "🚀 STRONG TREND"
+            color = "#4caf50"
+        # 2. Absorption (Pris ned + CVD opp)
+        elif price_change < 0 and net_cvd > 0:
+            signal = "🦅 ABSORPTION (Buy Dip)"
+            color = "#1b5e20"
+        # 3. Fake Pump (Pris opp + CVD ned + OI opp) -> Leverage driven
+        elif price_change > 0 and net_cvd < 0 and oi_change > 0:
+            signal = "⚠️ FAKE PUMP (Trap)"
+            color = "#ff9800"
+        # 4. Capitulation (Pris ned + CVD ned + OI ned) -> Longs puking
+        elif price_change < 0 and net_cvd < 0 and oi_change < 0:
+            signal = "🩸 CAPITULATION (Flush)"
+            color = "#f44336"
             
-        rhythm.append({
-            "week_num": i + 1 - len(usdt_chunks),
-            "usdt": flow_usdt,
-            "usdc": flow_usdc,
-            "net": flow_net,
-            "price_change": price_change_pct,
-            "phase": phase,
-            "color": phase_color
+        analysis.append({
+            "label": label_func(i, len(chunks)),
+            "price_change": price_change,
+            "cvd": net_cvd,
+            "oi_change": oi_change,
+            "signal": signal,
+            "color": color
         })
         
-    return rhythm
-
-def detect_signal(rhythm):
-    if len(rhythm) < 4: return "Waiting for data..."
-    recent = rhythm[-4:]
-    
-    for w in recent:
-        if "ABSORPTION" in w['phase']:
-            return "🔥 STRONG BUY: Absorption Detected (Whales Buying Dips)"
-        if "DISTRIBUTION" in w['phase']:
-            return "🛑 WARNING: Distribution Detected (Whales Selling Rips)"
-            
-    cum_net = sum(w['net'] for w in recent)
-    if cum_net > 0: return "✅ BULLISH FLOW: Net Buying Last 30 Days"
-    return "❌ BEARISH FLOW: Net Selling Last 30 Days"
+    return list(reversed(analysis))
 
 async def analyze_market(ticker):
     async with aiohttp.ClientSession() as session:
-        usdt_task = fetch_candles(session, f"{ticker}USDT", "4h", 600)
-        usdc_task = fetch_candles(session, f"{ticker}USDC", "4h", 600)
-        res = await asyncio.gather(usdt_task, usdc_task)
+        # 1. Fetch Macro Data (90 dager -> 4h candles)
+        # 90 dager * 6 candles/dag = 540 candles
+        spot_4h_task = fetch_spot_candles(session, f"{ticker}USDT", "4h", 600)
+        oi_4h_task = fetch_futures_oi(session, f"{ticker}USDT", "4h", 600)
         
-    rhythm = analyze_rhythm(res[0], res[1])
-    signal = detect_signal(rhythm)
+        # 2. Fetch Micro Data (7 dager -> 1h candles)
+        # 7 dager * 24 candles/dag = 168 candles
+        spot_1h_task = fetch_spot_candles(session, f"{ticker}USDT", "1h", 200)
+        oi_1h_task = fetch_futures_oi(session, f"{ticker}USDT", "1h", 200)
+        
+        funding_task = fetch_funding(session, f"{ticker}USDT")
+        
+        results = await asyncio.gather(spot_4h_task, oi_4h_task, spot_1h_task, oi_1h_task, funding_task)
+        
+    spot_4h, oi_4h, spot_1h, oi_1h, funding = results
     
-    return {"ticker": ticker, "rhythm": rhythm, "signal": signal}
+    # --- ANALYSE 1: Macro Rhythm (90 Dager -> Uker) ---
+    # 4h candles per uke = 6 * 7 = 42
+    macro_rhythm = analyze_period(spot_4h, oi_4h, 42, lambda i, n: f"{n-i-1} weeks ago" if n-i-1 > 0 else "Current Week")
+    
+    # --- ANALYSE 2: Swing Rhythm (7 Dager -> Dager) ---
+    # 1h candles per dag = 24
+    swing_rhythm = analyze_period(spot_1h, oi_1h, 24, lambda i, n: f"{n-i-1} days ago" if n-i-1 > 0 else "Last 24h")
+    
+    # --- ANALYSE 3: Sniper Rhythm (24 Timer -> Timer) ---
+    # 1h candles per time = 1. Vi tar de siste 24 av spot_1h.
+    sniper_rhythm = analyze_period(spot_1h[-24:], oi_1h[-24:], 1, lambda i, n: f"{n-i-1}h ago" if n-i-1 > 0 else "Now")
+    
+    return {
+        "ticker": ticker, 
+        "macro": macro_rhythm[:12], # Siste 12 uker
+        "swing": swing_rhythm,      # Siste 7 dager
+        "sniper": sniper_rhythm,    # Siste 24 timer
+        "funding": funding
+    }
 
 @app.get("/html/{ticker}", response_class=HTMLResponse)
 async def get_dashboard(ticker: str):
     data = await analyze_market(ticker.upper())
-    r = data["rhythm"]
     
-    def fmt(val):
-        color = "green" if val > 0 else "red"
-        return f"<span style='color:{color};'>${val/1_000_000:.1f}M</span>"
-    
-    rows = ""
-    for w in reversed(r):
-        week_label = "Current Week" if w['week_num'] == 0 else f"{abs(w['week_num'])} weeks ago"
-        p_col = "green" if w['price_change'] > 0 else "red"
+    def render_table(title, rows):
+        html = f"""
+        <div style="margin-bottom:30px;">
+            <h3 style="margin:0 0 10px 0; color:#444; border-bottom:2px solid #eee; padding-bottom:5px;">{title}</h3>
+            <table style="width:100%; border-collapse: collapse; font-size:13px;">
+                <tr style="background:#fafafa; color:#888; text-align:left;">
+                    <th style="padding:8px;">Time</th>
+                    <th style="padding:8px;">Signal</th>
+                    <th style="padding:8px;">Spot CVD (Demand)</th>
+                    <th style="padding:8px;">OI (Fuel)</th>
+                    <th style="padding:8px;">Price</th>
+                </tr>"""
         
-        rows += f"""
-        <tr style="border-bottom:1px solid #eee;">
-            <td style="padding:10px; color:#666;">{week_label}</td>
-            <td style="padding:10px; font-weight:bold; color:{w['color']};">{w['phase']}</td>
-            <td style="padding:10px;">{fmt(w['usdt'])}</td>
-            <td style="padding:10px;">{fmt(w['usdc'])}</td>
-            <td style="padding:10px; font-weight:bold;">{fmt(w['net'])}</td>
-            <td style="padding:10px; color:{p_col};">{w['price_change']:.1f}%</td>
-        </tr>
-        """
+        for r in rows:
+            cvd_col = "green" if r['cvd'] > 0 else "red"
+            oi_col = "green" if r['oi_change'] > 0 else "red"
+            p_col = "green" if r['price_change'] > 0 else "red"
+            
+            html += f"""
+            <tr style="border-bottom:1px solid #eee;">
+                <td style="padding:8px; color:#666;">{r['label']}</td>
+                <td style="padding:8px; font-weight:bold; color:{r['color']};">{r['signal']}</td>
+                <td style="padding:8px; color:{cvd_col};">${r['cvd']/1_000_000:.1f}M</td>
+                <td style="padding:8px; color:{oi_col};">{r['oi_change']:.1f}%</td>
+                <td style="padding:8px; color:{p_col};">{r['price_change']:.1f}%</td>
+            </tr>"""
+        
+        html += "</table></div>"
+        return html
 
+    funding_color = "red" if data['funding'] > 0.01 else "green"
+    
     html = f"""
     <html><body style="font-family: sans-serif; background: #f0f2f5; padding: 20px;">
-        <div style="background: white; padding: 25px; border-radius: 16px; box-shadow: 0 4px 20px rgba(0,0,0,0.08); max-width: 800px; margin: auto;">
-            <div style="text-align:center; margin-bottom:20px;">
-                <h1 style="margin:0; font-size:24px;">🐋 {data['ticker']} Full Spectrum</h1>
-                <p style="color:#888; margin:5px 0;">USDT + USDC + Net Flow Analysis • 90 Days</p>
-                <div style="background:#e3f2fd; color:#1565c0; padding:10px; border-radius:8px; display:inline-block; margin-top:10px; font-weight:bold;">
-                    {data['signal']}
+        <div style="background: white; padding: 30px; border-radius: 16px; box-shadow: 0 4px 20px rgba(0,0,0,0.08); max-width: 900px; margin: auto;">
+            
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:30px;">
+                <div>
+                    <h1 style="margin:0; font-size:28px;">🐋 {data['ticker']} Smart Money Triad</h1>
+                    <p style="color:#888; margin:5px 0;">Spot CVD • Open Interest • Funding Rate</p>
+                </div>
+                <div style="text-align:right;">
+                    <div style="font-size:12px; color:#888;">Current Funding</div>
+                    <div style="font-size:20px; font-weight:bold; color:{funding_color};">{data['funding']:.4f}%</div>
                 </div>
             </div>
-            <table style="width:100%; border-collapse: collapse; font-size:13px;">
-                <tr style="background:#fafafa; text-align:left; color:#888;">
-                    <th style="padding:10px;">Periode</th>
-                    <th style="padding:10px;">Phase</th>
-                    <th style="padding:10px;">USDT (Retail)</th>
-                    <th style="padding:10px;">USDC (Whale)</th>
-                    <th style="padding:10px;">NET (Total)</th>
-                    <th style="padding:10px;">Price</th>
-                </tr>
-                {rows}
-            </table>
+
+            {render_table("🦅 Swing Rhythm (Last 7 Days)", data['swing'])}
+            {render_table("⚡ Sniper Rhythm (Last 24 Hours)", data['sniper'])}
+            {render_table("🐋 Macro Rhythm (Last 12 Weeks)", data['macro'])}
+            
+            <div style="margin-top:20px; padding:15px; background:#e3f2fd; border-radius:8px; font-size:13px; color:#1565c0;">
+                <strong>💡 Pro Tip:</strong> Look for <b>ABSORPTION</b> (Green Signal) in the <i>Sniper Rhythm</i> to time your entry perfectly after a dump.
+            </div>
         </div>
     </body></html>
     """
