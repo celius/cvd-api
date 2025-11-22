@@ -6,7 +6,7 @@ import asyncio
 from datetime import datetime, timedelta, timezone
 import time
 
-app = FastAPI(title="CVD API v4.0", version="4.0")
+app = FastAPI(title="CVD API v4.1", version="4.1")
 
 app.add_middleware(
     CORSMiddleware,
@@ -17,123 +17,140 @@ app.add_middleware(
 
 BASE_URL = "https://api.binance.com/api/v3/aggTrades"
 
-async def fetch_candle_volume(session, symbol, start_ts, end_ts):
-    """Henter aggregert volum for et tidsvindu."""
-    params = {
-        "symbol": symbol,
-        "startTime": start_ts,
-        "endTime": end_ts,
-        "limit": 1000
-    }
+async def fetch_flow(session, symbol, start_ts, end_ts):
+    """Henter kjøp/salg volum for et par."""
+    params = {"symbol": symbol, "startTime": start_ts, "endTime": end_ts, "limit": 1000}
     try:
         async with session.get(BASE_URL, params=params, timeout=5) as resp:
-            if resp.status != 200: return 0.0, 0.0
+            if resp.status != 200: return 0.0
             data = await resp.json()
-            if not data: return 0.0, 0.0
+            if not data: return 0.0
             
-            buy_vol = 0.0
-            sell_vol = 0.0
-            for t in data:
-                vol = float(t['q']) * float(t['p'])
-                if t['m']: sell_vol += vol
-                else: buy_vol += vol
-            return buy_vol, sell_vol
-    except: return 0.0, 0.0
+            buy = sum(float(t['q']) * float(t['p']) for t in data if not t['m'])
+            sell = sum(float(t['q']) * float(t['p']) for t in data if t['m'])
+            return buy - sell # Returner Net Flow (CVD)
+    except: return 0.0
 
-async def analyze_trend_segment(ticker):
+async def analyze_xray_trend(ticker):
     now = datetime.now(timezone.utc)
     segments = []
     
-    # Definer tidsvinduer (Weighted Sampling)
-    # 1. High Res (Siste 4t, annenhvert kvarter)
-    for i in range(0, 240, 30): 
-        segments.append({"offset": i, "type": "HighRes"})
-        
-    # 2. Low Res (4-8t siden, ett kvarter per time)
-    for i in range(240, 480, 60):
-        segments.append({"offset": i, "type": "LowRes"})
-        
+    # Sampling Strategi:
+    # 0-2t: Hvert 15 min (Super High Res)
+    # 2-8t: Hvert 60 min (Trend Context)
+    
+    offsets = [0, 15, 30, 45, 60, 90, 120, 180, 240, 300, 360, 420]
+    
     tasks = []
     async with aiohttp.ClientSession() as session:
-        for seg in segments:
-            # Beregn start/slutt for dette 15min vinduet
-            start_time = now - timedelta(minutes=seg["offset"] + 15)
-            end_time = now - timedelta(minutes=seg["offset"])
-            
+        for offset in offsets:
+            start_time = now - timedelta(minutes=offset + 15)
+            end_time = now - timedelta(minutes=offset)
             start_ts = int(start_time.timestamp() * 1000)
             end_ts = int(end_time.timestamp() * 1000)
             
-            # Sjekk både USDT og USDC
-            tasks.append(fetch_candle_volume(session, f"{ticker}USDT", start_ts, end_ts))
-            tasks.append(fetch_candle_volume(session, f"{ticker}USDC", start_ts, end_ts))
+            # Vi henter USDT og USDC separat for å sammenligne dem
+            tasks.append(fetch_flow(session, f"{ticker}USDT", start_ts, end_ts))
+            tasks.append(fetch_flow(session, f"{ticker}USDC", start_ts, end_ts))
             
         results = await asyncio.gather(*tasks)
         
-    # Aggreger resultatene
-    trend_data = []
-    total_cvd_now = 0
-    total_cvd_prev = 0
+    # Strukturering av data
+    data_points = []
+    retail_sum_2h = 0
+    insti_sum_2h = 0
     
-    # Results kommer i par (USDT, USDC) for hvert segment
-    for i, seg in enumerate(segments):
-        usdt_res = results[i*2]
-        usdc_res = results[i*2+1]
+    for i, offset in enumerate(offsets):
+        retail_flow = results[i*2]      # USDT
+        insti_flow = results[i*2+1]     # USDC
         
-        net_flow = (usdt_res[0] - usdt_res[1]) + (usdc_res[0] - usdc_res[1])
-        
-        trend_data.append({
-            "time_ago_min": seg["offset"],
-            "flow": net_flow,
-            "type": seg["type"]
+        if offset < 120: # Siste 2 timer
+            retail_sum_2h += retail_flow
+            insti_sum_2h += insti_flow
+            
+        data_points.append({
+            "time": f"{offset}m ago",
+            "retail": retail_flow,
+            "insti": insti_flow
         })
-        
-        # Enkel trend-sjekk (Siste 2t vs Forrige 2t av samplet data)
-        if seg["offset"] < 120: total_cvd_now += net_flow
-        elif seg["offset"] < 240: total_cvd_prev += net_flow
 
-    # Analyser trend
-    trend_change = "STABLE"
-    if total_cvd_now > 0 and total_cvd_prev < 0: trend_change = "BULLISH REVERSAL"
-    elif total_cvd_now > total_cvd_prev * 1.5 and total_cvd_now > 0: trend_change = "ACCELERATING UPTREND"
-    elif total_cvd_now < 0 and total_cvd_prev > 0: trend_change = "BEARISH REVERSAL"
-    elif total_cvd_now < total_cvd_prev * 1.5 and total_cvd_now < 0: trend_change = "ACCELERATING DOWNTREND"
+    # Tolkning av Divergens (Siste 2 timer)
+    signal = "NEUTRAL FLOW"
+    sig_color = "gray"
+    
+    if insti_sum_2h > 0 and retail_sum_2h < 0:
+        signal = "🐋 SMART ACCUMULATION (Insti Buy / Retail Sell)"
+        sig_color = "#2e7d32" # Strong Green
+    elif insti_sum_2h < 0 and retail_sum_2h > 0:
+        signal = "⚠️ SMART DISTRIBUTION (Insti Sell / Retail Buy)"
+        sig_color = "#c62828" # Strong Red
+    elif insti_sum_2h > 0 and retail_sum_2h > 0:
+        signal = "🚀 STRONG MOMENTUM (All Buying)"
+        sig_color = "#1b5e20"
+    elif insti_sum_2h < 0 and retail_sum_2h < 0:
+        signal = "🩸 HEAVY DUMP (All Selling)"
+        sig_color = "#b71c1c"
 
     return {
         "ticker": ticker,
-        "trend_signal": trend_change,
-        "recent_flow": round(total_cvd_now, 2),
-        "prev_flow": round(total_cvd_prev, 2),
-        "data_points": len(trend_data),
-        "segments": trend_data,
-        "timestamp": now.isoformat()
+        "signal": signal,
+        "sig_color": sig_color,
+        "retail_2h": retail_sum_2h,
+        "insti_2h": insti_sum_2h,
+        "segments": data_points,
+        "timestamp": now.strftime("%H:%M UTC")
     }
 
-@app.get("/trend/{ticker}")
-async def get_trend(ticker: str):
-    return await analyze_trend_segment(ticker.upper())
-
 @app.get("/html/{ticker}", response_class=HTMLResponse)
-async def get_html(ticker: str):
-    data = await analyze_trend_segment(ticker.upper())
+async def get_xray_html(ticker: str):
+    data = await analyze_xray_trend(ticker.upper())
     
     rows = ""
-    for seg in data["segments"]:
-        color = "green" if seg["flow"] > 0 else "red"
-        rows += f"<tr><td>{seg['time_ago_min']}m ago</td><td style='color:{color}'>${seg['flow']:,.0f}</td><td>{seg['type']}</td></tr>"
-        
-    c_sig = "green" if "BULL" in data["trend_signal"] or "UP" in data["trend_signal"] else "red"
-    if "STABLE" in data["trend_signal"]: c_sig = "gray"
+    for p in data["segments"]:
+        r_col = "red" if p["retail"] < 0 else "green"
+        i_col = "red" if p["insti"] < 0 else "green"
+        # Uthev Smart Money flow hvis den er stor og motsatt av retail
+        bg = ""
+        if (p["insti"] > 0 and p["retail"] < 0) or (p["insti"] < 0 and p["retail"] > 0):
+            bg = "background: #fffde7;" # Highlight divergence
+            
+        rows += f"""<tr style='{bg} border-bottom:1px solid #eee;'>
+            <td style='padding:8px; color:#888;'>{p['time']}</td>
+            <td style='padding:8px; font-weight:bold; color:{r_col};'>${p['retail']:,.0f}</td>
+            <td style='padding:8px; font-weight:bold; color:{i_col};'>${p['insti']:,.0f}</td>
+        </tr>"""
 
     return f"""<html><body style="font-family: sans-serif; padding: 20px; background: #f5f5f5;">
-    <div style="background: #fff; padding: 30px; border-radius: 12px; max-width: 600px; margin: auto; box-shadow: 0 4px 12px rgba(0,0,0,0.1);">
-        <h1>📊 {data['ticker']} Trend (8H)</h1>
-        <h2 style="color:{c_sig}">{data['trend_signal']}</h2>
-        <div style="display:flex; gap:20px; margin-bottom:20px;">
-            <div><strong>Recent Flow (0-2h):</strong> ${data['recent_flow']:,.0f}</div>
-            <div><strong>Prev Flow (2-4h):</strong> ${data['prev_flow']:,.0f}</div>
+    <div style="background: #fff; padding: 25px; border-radius: 12px; max-width: 600px; margin: auto; box-shadow: 0 4px 12px rgba(0,0,0,0.1);">
+        <div style="display:flex; justify-content:space-between; align-items:center;">
+            <h1 style="margin:0;">🔍 {data['ticker']} X-Ray</h1>
+            <span style="color:#aaa; font-size:12px;">{data['timestamp']}</span>
         </div>
-        <table style="width:100%; text-align:left; border-collapse:collapse;">
-            <tr style="border-bottom:1px solid #eee;"><th>Time</th><th>Net Flow</th><th>Type</th></tr>
+        
+        <div style="margin:20px 0; padding:15px; background:{data['sig_color']}15; border-left:5px solid {data['sig_color']};">
+            <h3 style="margin:0; color:{data['sig_color']};">{data['signal']}</h3>
+        </div>
+
+        <div style="display:grid; grid-template-columns:1fr 1fr; gap:15px; margin-bottom:25px;">
+            <div style="text-align:center; padding:10px; background:#fafafa; border-radius:8px;">
+                <div style="font-size:12px; color:#666;">🛒 RETAIL (USDT) 2H</div>
+                <div style="font-size:18px; font-weight:bold; color:{'green' if data['retail_2h']>0 else 'red'}">${data['retail_2h']:,.0f}</div>
+            </div>
+            <div style="text-align:center; padding:10px; background:#fff8e1; border:1px solid #ffecb3; border-radius:8px;">
+                <div style="font-size:12px; color:#f57f17; font-weight:bold;">🏦 SMART MONEY (USDC) 2H</div>
+                <div style="font-size:18px; font-weight:bold; color:{'green' if data['insti_2h']>0 else 'red'}">${data['insti_2h']:,.0f}</div>
+            </div>
+        </div>
+
+        <table style="width:100%; text-align:right; border-collapse:collapse; font-size:14px;">
+            <tr style="background:#fafafa; color:#666;">
+                <th style="padding:10px; text-align:left;">Time</th>
+                <th style="padding:10px;">🛒 Retail Flow</th>
+                <th style="padding:10px;">🏦 Smart Flow</th>
+            </tr>
             {rows}
         </table>
+        <div style="margin-top:15px; font-size:11px; color:#999; text-align:center;">
+            Divergence (Yellow Rows) = High Value Signal
+        </div>
     </div></body></html>"""
