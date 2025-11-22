@@ -1,12 +1,11 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 import aiohttp
 import asyncio
-import pandas as pd
 from datetime import datetime, timezone
 
-app = FastAPI(title="CVD API v8.1 - Multi-Timeframe", version="8.1")
+app = FastAPI(title="CVD API v8.0 - Whale vs Retail", version="8.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -15,148 +14,230 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# --- CONFIG ---
 DOMAIN_SPOT = "https://api.binance.com"
 DOMAIN_FUTURES = "https://fapi.binance.com"
 
-# --- HJELPEFUNKSJONER ---
-
-async def fetch_url(session, url, params=None):
+async def fetch_url(session, url):
     try:
-        async with session.get(url, params=params) as response:
-            if response.status != 200: return None
-            return await response.json()
-    except: return None
+        async with session.get(url) as response:
+            if response.status == 200:
+                return await response.json()
+    except Exception as e:
+        print(f"Error fetching {url}: {e}")
+    return None
 
-def format_number(num):
-    if abs(num) >= 1_000_000_000: return f"{num / 1_000_000_000:.2f}B"
-    if abs(num) >= 1_000_000: return f"{num / 1_000_000:.2f}M"
-    if abs(num) >= 1_000: return f"{num / 1_000:.2f}k"
-    return f"{num:.2f}"
+# --- WHALE & RETAIL ANALYSIS ENGINE ---
+def get_signal(price_ch, cvd_val, whale_ls, retail_ls):
+    # price_ch: %, cvd_val: float, whale_ls: float, retail_ls: float
+    
+    # Default
+    head = "⚖️ NØYTRAL"; desc = "Ingen klare avvik."; col = "#888"
 
-def get_css():
-    return '''
-    body { font-family: sans-serif; background: #191919; color: #e0e0e0; padding: 20px; }
-    h2, h3 { border-bottom: 1px solid #333; padding-bottom: 5px; margin-top: 30px; }
-    table { width: 100%; border-collapse: collapse; margin-bottom: 20px; font-size: 0.9em; }
-    th { text-align: left; color: #888; border-bottom: 1px solid #444; padding: 5px; }
-    td { padding: 5px; border-bottom: 1px solid #2a2a2a; }
-    .bull { color: #4caf50; }
-    .bear { color: #ff5252; }
-    .card { background: #252525; padding: 15px; border-radius: 8px; border: 1px solid #333; }
-    .row-bull { background: rgba(76, 175, 80, 0.05); }
-    .row-bear { background: rgba(255, 82, 82, 0.05); }
-    '''
+    # 1. WHALE DIVERGENCE (Most Powerful)
+    # Hvis Whales er uenige med Prisen
+    if price_ch < -0.5 and whale_ls > 1.2:
+        head = "🐋 WHALE ACCUMULATION"
+        desc = "Pris faller, men Whales laster opp Longs. Bullish divergens."
+        col = "#00ccff"
+        if retail_ls < 0.8:
+            desc += " Retail har panikk (Capitulation)."
+            col = "#00ff9d" # Super Bullish
+            
+    elif price_ch > 0.5 and whale_ls < 0.8:
+        head = "🐋 WHALE DISTRIBUTION"
+        desc = "Pris stiger, men Whales shorter. Bearish divergens."
+        col = "#ff4d4d"
+        if retail_ls > 2.0:
+            desc += " Retail fomo-kjøper toppen."
+            col = "#ff0000" # Super Bearish
 
-def interpret_sentiment(g_ratio, t_pos):
-    signals = []
-    if g_ratio > 1.5: signals.append("Retail: FOMO Longs")
-    elif g_ratio < 0.6: signals.append("Retail: Panikk Shorts")
-    
-    if g_ratio > 1.2 and t_pos < 0.9: signals.append("⚠️ DIVERGENS: Retail kjøper, Whales selger")
-    elif g_ratio < 0.8 and t_pos > 1.1: signals.append("💎 DIVERGENS: Retail selger, Whales kjøper")
-    
-    return " + ".join(signals) if signals else "Nøytralt / Ingen ekstrem divergens"
+    # 2. SPOT CVD CONFIRMATION (Hvis ingen stor whale divergens)
+    elif price_ch > 0.5:
+        if cvd_val > 0:
+            head = "🚀 SUNN OPPGANG"
+            desc = "Pris opp støttet av Spot-kjøp."
+            col = "#00ff9d"
+        else:
+            head = "⚠️ SVAK OPPGANG"
+            desc = "Pris opp, men Spot selger (mulig felle)."
+            col = "#ffa500"
+            
+    elif price_ch < -0.5:
+        if cvd_val > 0:
+            head = "🛡️ SPOT ABSORBERING"
+            desc = "Pris ned, men Spot kjøper imot."
+            col = "#0099ff"
+        else:
+            head = "📉 AGGRESSIVT SALG"
+            desc = "Pris ned støttet av Spot-salg."
+            col = "#ffcccc"
 
-def process_klines(klines, interval_name):
-    if not klines: return pd.DataFrame()
-    # Binance Kline: 0=Time, 1=Open, 4=Close, 5=Vol, 9=TakerBuyBaseVol
-    df = pd.DataFrame(klines, columns=['Time', 'Open', 'High', 'Low', 'Close', 'Vol', 'CloseTime', 'QuoteVol', 'Trades', 'TakerBuyBase', 'TakerBuyQuote', 'Ignore'])
-    df['Time'] = pd.to_datetime(df['Time'], unit='ms')
-    df['Close'] = df['Close'].astype(float)
-    df['Vol'] = df['Vol'].astype(float) # Total Volume
-    df['TakerBuyBase'] = df['TakerBuyBase'].astype(float) # Buy Volume
-    
-    # CVD Calculation: Buy - (Total - Buy) = Buy - Sell
-    df['SellVol'] = df['Vol'] - df['TakerBuyBase']
-    df['CVD'] = df['TakerBuyBase'] - df['SellVol']
-    
-    return df[['Time', 'Close', 'CVD']]
+    return head, desc, col
 
-def render_table(df, title, time_format='%H:%M'):
-    if df.empty: return f"<h3>{title}</h3><p>Ingen data.</p>"
+async def get_sentiment_history(session, symbol, period, limit, endpoint):
+    # Mapping limits
+    req_limit = limit
+    if period == '1w': period = '1d'; req_limit = limit * 7
+    if period == '1M': period = '1d'; req_limit = limit * 30
+    if req_limit > 499: req_limit = 499
+
+    url = f"{DOMAIN_FUTURES}/futures/data/{endpoint}?symbol={symbol}&period={period}&limit={req_limit}"
+    data = await fetch_url(session, url)
     
-    html = f"<h3>{title}</h3><table><tr><th>Tid</th><th>Pris</th><th>Net CVD</th><th>Signal</th></tr>"
-    # Snu rekkefølge slik at nyeste er øverst
-    for _, row in df.sort_values('Time', ascending=False).iterrows():
-        time_str = row['Time'].strftime(time_format)
-        cvd_val = row['CVD']
-        price = row['Close']
+    res_map = {}
+    if data:
+        for item in data:
+            val = float(item['longShortRatio'])
+            res_map[int(item['timestamp'])] = val
+    return res_map
+
+def get_closest(ts, data_map):
+    if not data_map: return 0.0
+    if ts in data_map: return data_map[ts]
+    keys = list(data_map.keys())
+    if not keys: return 0.0
+    closest_ts = min(keys, key=lambda k: abs(k - ts))
+    return data_map[closest_ts]
+
+async def get_kline_analysis(session, symbol, interval, limit):
+    # 1. Spot Price & CVD
+    kline_url = f"{DOMAIN_SPOT}/api/v3/klines?symbol={symbol}&interval={interval}&limit={limit}"
+    klines = await fetch_url(session, kline_url)
+    
+    # 2. Whale Sentiment (Top Trader Positions)
+    whale_task = get_sentiment_history(session, symbol, interval, limit, "topLongShortPositionRatio")
+    # 3. Retail Sentiment (Global Accounts)
+    retail_task = get_sentiment_history(session, symbol, interval, limit, "globalLongShortAccountRatio")
+    
+    whale_map, retail_map = await asyncio.gather(whale_task, retail_task)
+    
+    rows = []
+    if klines:
+        for k in klines:
+            ts = int(k[0])
+            dt_obj = datetime.fromtimestamp(ts / 1000, tz=timezone.utc)
+            
+            open_p = float(k[1]); close_p = float(k[4])
+            buy_vol = float(k[10]); sell_vol = float(k[7]) - buy_vol
+            
+            price_ch = ((close_p - open_p) / open_p) * 100
+            cvd = buy_vol - sell_vol
+            
+            # Sentiment Lookup
+            w_ls = get_closest(ts, whale_map)
+            r_ls = get_closest(ts, retail_map)
+
+            # Labels
+            if interval == '15m': label = dt_obj.strftime("%H:%M")
+            elif interval == '1h': label = dt_obj.strftime("%H:00")
+            elif interval == '1d': label = dt_obj.strftime("%Y-%m-%d")
+            elif interval == '1w': label = f"Uke {dt_obj.strftime('%W')}"
+            elif interval == '1M': label = dt_obj.strftime("%B")
+            else: label = str(ts)
+
+            head, desc, col = get_signal(price_ch, cvd, w_ls, r_ls)
+            
+            rows.append({
+                "label": label, "price_ch": price_ch, "cvd": cvd,
+                "w_ls": w_ls, "r_ls": r_ls,
+                "head": head, "desc": desc, "col": col
+            })
+            
+    return list(reversed(rows))
+
+def render_table_rows(rows):
+    html = ""
+    for r in rows:
+        p_col = "#00ff9d" if r['price_ch'] >= 0 else "#ff4d4d"
         
-        cls = "row-bull" if cvd_val > 0 else "row-bear"
-        sig = "🟢 Kjøp" if cvd_val > 0 else "🔴 Salg"
-        val_str = f"{'+' if cvd_val > 0 else ''}{format_number(cvd_val)}"
+        if abs(r['cvd']) > 1_000_000: cvd_fmt = f"${r['cvd']/1_000_000:+.1f}M"
+        else: cvd_fmt = f"${r['cvd']/1_000:+.0f}k"
+        cvd_col = "#00ff9d" if r['cvd'] >= 0 else "#ff4d4d"
         
-        html += f'<tr class="{cls}"><td>{time_str}</td><td>${price:.4f}</td><td class="{cls}">{val_str}</td><td>{sig}</td></tr>'
-    html += "</table>"
+        # Whale Color: Green if Long Bias (>1.2), Red if Short Bias (<0.8)
+        w_col = "#00ff9d" if r['w_ls'] > 1.2 else ("#ff4d4d" if r['w_ls'] < 0.8 else "#aaa")
+        
+        # Retail Color: Red if overly Long (>2.0 - contrarian), Green if Fearful (<0.8)
+        r_col = "#ff4d4d" if r['r_ls'] > 2.0 else ("#00ff9d" if r['r_ls'] < 0.8 else "#aaa")
+
+        html += f"""
+        <tr style="border-bottom: 1px solid #222;">
+            <td style="padding: 8px; color: #aaa; font-size: 0.9em; white-space: nowrap;">{r['label']}</td>
+            <td style="padding: 8px; color: {p_col}; font-weight: bold;">{r['price_ch']:+.2f}%</td>
+            <td style="padding: 8px; color: {cvd_col}; font-family: monospace;">{cvd_fmt}</td>
+            <td style="padding: 8px; color: {w_col}; font-weight: bold;">{r['w_ls']:.2f}</td>
+            <td style="padding: 8px; color: {r_col};">{r['r_ls']:.2f}</td>
+            <td style="padding: 8px;">
+                <div style="color: {r['col']}; font-weight: bold; font-size: 0.8em;">{r['head']}</div>
+                <div style="color: #666; font-size: 0.7em;">{r['desc']}</div>
+            </td>
+        </tr>
+        """
     return html
 
-# --- ENDPOINTS ---
+def generate_html_page(symbol, monthly, weekly, daily, hourly, min15):
+    return f"""
+    <div class="coin-container" style="margin-bottom: 60px; background: #111; padding: 20px; border-radius: 8px; border: 1px solid #333;">
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom: 20px;">
+            <h1 style="margin: 0; font-size: 2em;">{symbol.replace('USDT','')} Analysis</h1>
+            <div style="font-size: 0.8em; color: #666;">v8.0 Whale vs Retail</div>
+        </div>
+        <style>
+            table  width: 100%; border-collapse: collapse; font-size: 0.9em; margin-bottom: 30px; 
+            th  text-align: left; padding: 8px; border-bottom: 2px solid #444; color: #aaa; text-transform: uppercase; font-size: 0.7em; 
+        </style>
+        
+        <h3 style="color: #00ccff; border-bottom: 1px solid #00ccff; padding-bottom: 5px;">⚡ Siste 4 Timer (Sniper)</h3>
+        <table><tr><th width="10%">Tid</th><th width="10%">Pris %</th><th width="15%">Spot CVD</th><th width="10%">🐋 Whale L/S</th><th width="10%">🐟 Retail L/S</th><th width="45%">Mode 7 Analyse</th></tr>{render_table_rows(min15)}</table>
 
-@app.get("/html/{ticker}")
-async def get_analysis(ticker: str):
-    symbol = ticker.upper() + "USDT"
+        <h3 style="color: #00ccff; border-bottom: 1px solid #00ccff; padding-bottom: 5px;">⏱️ Siste 24 Timer (Hourly)</h3>
+        <table><tr><th>Tid</th><th>Pris %</th><th>Spot CVD</th><th>🐋 Whale</th><th>🐟 Retail</th><th>Analyse</th></tr>{render_table_rows(hourly)}</table>
+
+        <h3 style="color: #00ccff; border-bottom: 1px solid #00ccff; padding-bottom: 5px;">📅 Siste 14 Dager (Daily)</h3>
+        <table><tr><th>Dato</th><th>Pris %</th><th>Spot CVD</th><th>🐋 Whale</th><th>🐟 Retail</th><th>Analyse</th></tr>{render_table_rows(daily)}</table>
+
+        <h3 style="color: #00ccff; border-bottom: 1px solid #00ccff; padding-bottom: 5px;">📆 Siste 24 Uker (Weekly)</h3>
+        <table><tr><th>Uke</th><th>Pris %</th><th>Spot CVD</th><th>🐋 Whale</th><th>🐟 Retail</th><th>Analyse</th></tr>{render_table_rows(weekly)}</table>
+        
+        <h3 style="color: #00ccff; border-bottom: 1px solid #00ccff; padding-bottom: 5px;">🌕 Siste 6 Måneder (Monthly)</h3>
+        <table><tr><th>Måned</th><th>Pris %</th><th>Spot CVD</th><th>🐋 Whale</th><th>🐟 Retail</th><th>Analyse</th></tr>{render_table_rows(monthly)}</table>
+    </div>
+    """
+
+BASE_HTML = """<html><head><title>Mode 7: Whale Watch</title><style>body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; background: #050505; color: #e0e0e0; padding: 20px; max-width: 1200px; margin: 0 auto; }</style></head><body>"""
+
+@app.get("/", response_class=HTMLResponse)
+async def dashboard():
+    symbols = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "DOGEUSDT"]
     async with aiohttp.ClientSession() as session:
-        # 1. SENTIMENT (X-RAY)
-        s_params = {"symbol": symbol, "period": "15m", "limit": 1}
-        t_g = fetch_url(session, f"{DOMAIN_FUTURES}/futures/data/globalLongShortAccountRatio", s_params)
-        t_p = fetch_url(session, f"{DOMAIN_FUTURES}/futures/data/topLongShortPositionRatio", s_params)
-        
-        # 2. KLINES FOR TIME TABLES
-        # 15m (Siste 4 timer = 16 candles)
-        t_15m = fetch_url(session, f"{DOMAIN_SPOT}/api/v3/klines", {"symbol": symbol, "interval": "15m", "limit": 16})
-        # 1h (Siste 24 timer = 24 candles)
-        t_1h = fetch_url(session, f"{DOMAIN_SPOT}/api/v3/klines", {"symbol": symbol, "interval": "1h", "limit": 24})
-        # 1d (Siste 180 dager)
-        t_1d = fetch_url(session, f"{DOMAIN_SPOT}/api/v3/klines", {"symbol": symbol, "interval": "1d", "limit": 180})
-        
-        res = await asyncio.gather(t_g, t_p, t_15m, t_1h, t_1d)
-        g_data, p_data, k_15m, k_1h, k_1d = res
+        tasks = [fetch_coin_data(session, sym) for sym in symbols]
+        results = await asyncio.gather(*tasks)
+    html = BASE_HTML + "".join(results) + "</body></html>"
+    return html
 
-        # --- PROSESSERING ---
-        
-        # Sentiment
-        g_val = float(g_data[0]['longShortRatio']) if g_data else 1.0
-        p_val = float(p_data[0]['longShortRatio']) if p_data else 1.0
-        sentiment_txt = interpret_sentiment(g_val, p_val)
-        
-        # DataFrames
-        df_15m = process_klines(k_15m, '15m')
-        df_1h = process_klines(k_1h, '1h')
-        df_1d = process_klines(k_1d, '1d')
-        
-        # Aggregations
-        # Siste 14 dager
-        df_last14 = df_1d.tail(14).copy()
-        
-        # Weekly (Resample 180 days)
-        df_weekly = df_1d.set_index('Time').resample('W-MON').agg({'Close': 'last', 'CVD': 'sum'}).reset_index()
-        
-        # Monthly
-        df_monthly = df_1d.set_index('Time').resample('ME').agg({'Close': 'last', 'CVD': 'sum'}).reset_index()
+@app.get("/html/{symbol}", response_class=HTMLResponse)
+async def single_coin(symbol: str):
+    clean = symbol.upper()
+    if "USDT" not in clean: clean += "USDT"
+    async with aiohttp.ClientSession() as session:
+        html = BASE_HTML + await fetch_coin_data(session, clean) + "</body></html>"
+    return html
 
-        # --- HTML GENERATION ---
-        html = f'''
-        <html><head><style>{get_css()}</style></head><body>
-            <h2>🔭 Mode 7: {symbol} (v8.1 Full Report)</h2>
-            
-            <div class="card">
-                <div style="font-size: 1.1em; color: #ffd700; margin-bottom: 10px;">{sentiment_txt}</div>
-                <div>Retail L/S: <b class="{ 'bull' if g_val > 1 else 'bear' }">{g_val}</b> | 
-                     Whale Pos: <b class="{ 'bull' if p_val > 1 else 'bear' }">{p_val}</b></div>
-            </div>
+async def fetch_coin_data(session, sym):
+    # 1. Monthly (6 mnd)
+    t_mon = get_kline_analysis(session, sym, "1M", 6)
+    # 2. Weekly (24 uker)
+    t_wek = get_kline_analysis(session, sym, "1w", 24)
+    # 3. Daily (14 dager)
+    t_day = get_kline_analysis(session, sym, "1d", 14)
+    # 4. Hourly (24 timer)
+    t_hor = get_kline_analysis(session, sym, "1h", 24)
+    # 5. 15-Min (4 timer)
+    t_min15 = get_kline_analysis(session, sym, "15m", 16)
+    
+    mon, wek, day, hor, min15 = await asyncio.gather(t_mon, t_wek, t_day, t_hor, t_min15)
+    return generate_html_page(sym, mon, wek, day, hor, min15)
 
-            {render_table(df_15m, "⚡ Siste 4 Timer (15m)", "%H:%M")}
-            {render_table(df_1h, "🕐 Siste Døgn (1h)", "%H:%M")}
-            {render_table(df_last14, "📅 Siste 14 Dager (Daily)", "%d-%m")}
-            {render_table(df_weekly.tail(26), "🗓️ Ukentlig (Siste 6 mnd)", "Uke %W")}
-            {render_table(df_monthly.tail(6), "🌙 Månedlig (Siste 6 mnd)", "%B %Y")}
-            
-            <p style="color: #555; font-size: 0.8em;">Generated by Mode 7 v8.1</p>
-        </body></html>
-        '''
-        return HTMLResponse(content=html)
-
-@app.get("/")
-def read_root():
-    return {"Status": "Online", "Version": "v8.1"}
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
