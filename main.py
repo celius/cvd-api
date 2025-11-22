@@ -5,7 +5,7 @@ import aiohttp
 import asyncio
 from datetime import datetime, timedelta, timezone
 
-app = FastAPI(title="CVD API v7.0 - Smart Money Triad", version="7.0")
+app = FastAPI(title="CVD API v7.1 - Smart Money Triad", version="7.1")
 
 app.add_middleware(
     CORSMiddleware,
@@ -14,8 +14,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-BASE_URL_SPOT = "https://api.binance.com/api/v3/klines"
-BASE_URL_FUTURES = "https://fapi.binance.com/fapi/v1/openInterest?symbol=BTCUSDT"
+# VIKTIG: Bruk nøyaktig disse URL-ene (uten placeholders)
+BASE_URL_SPOT = "https://api.binance.com"
+BASE_URL_FUTURES = "https://fapi.binance.com"
 
 async def fetch_spot_candles(session, symbol, interval, limit):
     """Henter Spot data (Pris + Net Flow)."""
@@ -57,12 +58,12 @@ def analyze_period(spot_data, oi_data, chunk_size, label_func):
     if not spot_data: return []
     
     # Synkroniser lengder (bruk korteste)
-    min_len = min(len(spot_data), len(oi_data))
+    min_len = min(len(spot_data), len(oi_data)) if oi_data else len(spot_data)
     spot_data = spot_data[-min_len:]
-    oi_data = oi_data[-min_len:]
+    oi_data = oi_data[-min_len:] if oi_data else []
     
     chunks = [spot_data[i:i + chunk_size] for i in range(0, len(spot_data), chunk_size)]
-    oi_chunks = [oi_data[i:i + chunk_size] for i in range(0, len(oi_data), chunk_size)]
+    oi_chunks = [oi_data[i:i + chunk_size] for i in range(0, len(oi_data), chunk_size)] if oi_data else []
     
     analysis = []
     for i, chunk in enumerate(chunks):
@@ -114,12 +115,10 @@ def analyze_period(spot_data, oi_data, chunk_size, label_func):
 async def analyze_market(ticker):
     async with aiohttp.ClientSession() as session:
         # 1. Fetch Macro Data (90 dager -> 4h candles)
-        # 90 dager * 6 candles/dag = 540 candles
         spot_4h_task = fetch_spot_candles(session, f"{ticker}USDT", "4h", 600)
         oi_4h_task = fetch_futures_oi(session, f"{ticker}USDT", "4h", 600)
         
         # 2. Fetch Micro Data (7 dager -> 1h candles)
-        # 7 dager * 24 candles/dag = 168 candles
         spot_1h_task = fetch_spot_candles(session, f"{ticker}USDT", "1h", 200)
         oi_1h_task = fetch_futures_oi(session, f"{ticker}USDT", "1h", 200)
         
@@ -130,16 +129,13 @@ async def analyze_market(ticker):
     spot_4h, oi_4h, spot_1h, oi_1h, funding = results
     
     # --- ANALYSE 1: Macro Rhythm (90 Dager -> Uker) ---
-    # 4h candles per uke = 6 * 7 = 42
     macro_rhythm = analyze_period(spot_4h, oi_4h, 42, lambda i, n: f"{n-i-1} weeks ago" if n-i-1 > 0 else "Current Week")
     
     # --- ANALYSE 2: Swing Rhythm (7 Dager -> Dager) ---
-    # 1h candles per dag = 24
     swing_rhythm = analyze_period(spot_1h, oi_1h, 24, lambda i, n: f"{n-i-1} days ago" if n-i-1 > 0 else "Last 24h")
     
     # --- ANALYSE 3: Sniper Rhythm (24 Timer -> Timer) ---
-    # 1h candles per time = 1. Vi tar de siste 24 av spot_1h.
-    sniper_rhythm = analyze_period(spot_1h[-24:], oi_1h[-24:], 1, lambda i, n: f"{n-i-1}h ago" if n-i-1 > 0 else "Now")
+    sniper_rhythm = analyze_period(spot_1h[-24:], oi_1h[-24:] if oi_1h else [], 1, lambda i, n: f"{n-i-1}h ago" if n-i-1 > 0 else "Now")
     
     return {
         "ticker": ticker, 
@@ -161,8 +157,8 @@ async def get_dashboard(ticker: str):
                 <tr style="background:#fafafa; color:#888; text-align:left;">
                     <th style="padding:8px;">Time</th>
                     <th style="padding:8px;">Signal</th>
-                    <th style="padding:8px;">Spot CVD (Demand)</th>
-                    <th style="padding:8px;">OI (Fuel)</th>
+                    <th style="padding:8px;">Spot CVD</th>
+                    <th style="padding:8px;">OI Change</th>
                     <th style="padding:8px;">Price</th>
                 </tr>"""
         
@@ -205,7 +201,7 @@ async def get_dashboard(ticker: str):
             {render_table("🐋 Macro Rhythm (Last 12 Weeks)", data['macro'])}
             
             <div style="margin-top:20px; padding:15px; background:#e3f2fd; border-radius:8px; font-size:13px; color:#1565c0;">
-                <strong>💡 Pro Tip:</strong> Look for <b>ABSORPTION</b> (Green Signal) in the <i>Sniper Rhythm</i> to time your entry perfectly after a dump.
+                <strong>💡 Pro Tip:</strong> Se etter <b>ABSORPTION</b> (Grønn) i <i>Sniper Rhythm</i> for å time bunnen perfekt.
             </div>
         </div>
     </body></html>
