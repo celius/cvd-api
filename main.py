@@ -113,22 +113,22 @@ async def get_analysis(ticker: str):
         sentiment_text = interpret_sentiment(g_ratio, ta_ratio, tp_ratio)
 
         # Bygg HTML
-        html_content = f"""
+        html_content = f\"\"\"
         <html>
         <head>
             <style>
-                body  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; background: #191919; color: #e0e0e0; padding: 20px; 
-                h2  color: #fff; border-bottom: 1px solid #333; padding-bottom: 10px; 
-                .card  background: #2d2d2d; padding: 15px; border-radius: 8px; margin-bottom: 20px; border-left: 4px solid #2196F3; 
-                .metric  font-size: 0.9em; color: #aaa; 
-                .val  font-size: 1.1em; font-weight: bold; color: #fff; 
-                .bullish  color: #4CAF50; 
-                .bearish  color: #F44336; 
-                table  width: 100%; border-collapse: collapse; font-size: 0.85em; 
-                th  text-align: left; color: #888; padding: 8px; border-bottom: 1px solid #444; 
-                td  padding: 8px; border-bottom: 1px solid #333; 
+                body  font-family: -apple-system, sans-serif; padding: 20px; background: #191919; color: #e0e0e0; 
+                h2  border-bottom: 1px solid #333; padding-bottom: 10px; 
+                .card  background: #252525; padding: 15px; border-radius: 8px; margin-bottom: 20px; border: 1px solid #333; 
+                .metric  font-size: 0.8em; color: #888; 
+                .val  font-size: 1.2em; font-weight: bold; 
+                .bullish  color: #4caf50; 
+                .bearish  color: #ff5252; 
+                table  width: 100%; border-collapse: collapse; font-size: 0.9em; 
+                th  text-align: left; color: #888; border-bottom: 1px solid #333; padding: 8px; 
+                td  padding: 8px; border-bottom: 1px solid #2a2a2a; 
                 .row-bull  background: rgba(76, 175, 80, 0.1); 
-                .row-bear  background: rgba(244, 67, 54, 0.1); 
+                .row-bear  background: rgba(255, 82, 82, 0.1); 
             </style>
         </head>
         <body>
@@ -162,7 +162,7 @@ async def get_analysis(ticker: str):
                     <th>CVD (Spot Vol)</th>
                     <th>Signal</th>
                 </tr>
-        """
+        \"\"\"
 
         cvd_cum = 0
         
@@ -188,21 +188,21 @@ async def get_analysis(ticker: str):
             else:
                 signal = "Spot Selger"
 
-            html_content += f"""
+            html_content += f\"\"\"
                 <tr class="{row_class}">
                     <td>{close_time}</td>
                     <td>${close_price:.2f}</td>
                     <td>{delta_str}</td>
                     <td>{signal}</td>
                 </tr>
-            """
+            \"\"\"
 
-        html_content += """
+        html_content += \"\"\"
             </table>
             <p style="color: #666; font-size: 0.8em; margin-top: 20px;">v8.0 - Retail vs Whale Edition</p>
         </body>
         </html>
-        """
+        \"\"\"
         
         return HTMLResponse(content=html_content)
 
