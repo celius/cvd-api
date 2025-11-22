@@ -4,9 +4,8 @@ from fastapi.responses import HTMLResponse
 import aiohttp
 import asyncio
 from datetime import datetime, timedelta, timezone
-import time
 
-app = FastAPI(title="CVD API v4.1", version="4.1")
+app = FastAPI(title="CVD API v5.0 - Whale Hunter", version="5.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -15,142 +14,134 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-BASE_URL = "https://api.binance.com/api/v3/aggTrades"
+# Binance bruker aggTrades for presisjon, men for 90 dager bruker vi klines (candles) for effektivitet
+BASE_URL = "https://api.binance.com/api/v3/klines"
 
-async def fetch_flow(session, symbol, start_ts, end_ts):
-    """Henter kjøp/salg volum for et par."""
-    params = {"symbol": symbol, "startTime": start_ts, "endTime": end_ts, "limit": 1000}
+async def fetch_candles(session, symbol, interval, limit):
+    """Henter candles (Open, High, Low, Close, Volume, QuoteVol)."""
+    params = {"symbol": symbol, "interval": interval, "limit": limit}
     try:
-        async with session.get(BASE_URL, params=params, timeout=5) as resp:
-            if resp.status != 200: return 0.0
+        async with session.get(BASE_URL, params=params, timeout=10) as resp:
+            if resp.status != 200: return []
             data = await resp.json()
-            if not data: return 0.0
-            
-            buy = sum(float(t['q']) * float(t['p']) for t in data if not t['m'])
-            sell = sum(float(t['q']) * float(t['p']) for t in data if t['m'])
-            return buy - sell # Returner Net Flow (CVD)
-    except: return 0.0
+            # Binance kline format: [time, open, high, low, close, vol, close_time, quote_vol, trades, taker_buy_base, taker_buy_quote, ignore]
+            # Vi er interessert i Taker Buy Volume for å beregne CVD (Kjøpspress)
+            # Taker Buy Quote Asset Volume er index 10. Total Quote Asset Volume er index 7.
+            # Buy Vol = Index 10. Sell Vol = Index 7 - Index 10.
+            processed = []
+            for k in data:
+                total_vol = float(k[7]) # Quote volume (USDT/USDC)
+                buy_vol = float(k[10])  # Taker buy quote volume
+                sell_vol = total_vol - buy_vol
+                net_flow = buy_vol - sell_vol
+                processed.append({"time": k[0], "net_flow": net_flow})
+            return processed
+    except: return []
 
-async def analyze_xray_trend(ticker):
-    now = datetime.now(timezone.utc)
-    segments = []
+def calculate_cvd(data, days=None):
+    """Summerer Net Flow for en gitt periode."""
+    if not data: return 0
     
-    # Sampling Strategi:
-    # 0-2t: Hvert 15 min (Super High Res)
-    # 2-8t: Hvert 60 min (Trend Context)
-    
-    offsets = [0, 15, 30, 45, 60, 90, 120, 180, 240, 300, 360, 420]
-    
-    tasks = []
+    now_ms = datetime.now(timezone.utc).timestamp() * 1000
+    if days:
+        cutoff = now_ms - (days * 24 * 60 * 60 * 1000)
+        filtered = [d['net_flow'] for d in data if d['time'] >= cutoff]
+    else:
+        filtered = [d['net_flow'] for d in data] # All data
+        
+    return sum(filtered)
+
+async def analyze_whale_trends(ticker):
     async with aiohttp.ClientSession() as session:
-        for offset in offsets:
-            start_time = now - timedelta(minutes=offset + 15)
-            end_time = now - timedelta(minutes=offset)
-            start_ts = int(start_time.timestamp() * 1000)
-            end_ts = int(end_time.timestamp() * 1000)
-            
-            # Vi henter USDT og USDC separat for å sammenligne dem
-            tasks.append(fetch_flow(session, f"{ticker}USDT", start_ts, end_ts))
-            tasks.append(fetch_flow(session, f"{ticker}USDC", start_ts, end_ts))
-            
-        results = await asyncio.gather(*tasks)
+        # 1. Hent MACRO data (4h candles, ca 90 dager = 540 candles)
+        # Vi henter 600 for å være sikre.
+        usdt_task = fetch_candles(session, f"{ticker}USDT", "4h", 600)
+        usdc_task = fetch_candles(session, f"{ticker}USDC", "4h", 600)
         
-    # Strukturering av data
-    data_points = []
-    retail_sum_2h = 0
-    insti_sum_2h = 0
-    
-    for i, offset in enumerate(offsets):
-        retail_flow = results[i*2]      # USDT
-        insti_flow = results[i*2+1]     # USDC
+        # 2. Hent MICRO data (15m candles, siste 24t = 96 candles)
+        # Vi bruker dette for "X-Ray" kortsiktig
+        usdt_micro_task = fetch_candles(session, f"{ticker}USDT", "15m", 96)
+        usdc_micro_task = fetch_candles(session, f"{ticker}USDC", "15m", 96)
         
-        if offset < 120: # Siste 2 timer
-            retail_sum_2h += retail_flow
-            insti_sum_2h += insti_flow
-            
-        data_points.append({
-            "time": f"{offset}m ago",
-            "retail": retail_flow,
-            "insti": insti_flow
-        })
-
-    # Tolkning av Divergens (Siste 2 timer)
-    signal = "NEUTRAL FLOW"
-    sig_color = "gray"
+        results = await asyncio.gather(usdt_task, usdc_task, usdt_micro_task, usdc_micro_task)
+        
+    macro_usdt, macro_usdc = results[0], results[1]
+    micro_usdt, micro_usdc = results[2], results[3]
     
-    if insti_sum_2h > 0 and retail_sum_2h < 0:
-        signal = "🐋 SMART ACCUMULATION (Insti Buy / Retail Sell)"
-        sig_color = "#2e7d32" # Strong Green
-    elif insti_sum_2h < 0 and retail_sum_2h > 0:
-        signal = "⚠️ SMART DISTRIBUTION (Insti Sell / Retail Buy)"
-        sig_color = "#c62828" # Strong Red
-    elif insti_sum_2h > 0 and retail_sum_2h > 0:
-        signal = "🚀 STRONG MOMENTUM (All Buying)"
-        sig_color = "#1b5e20"
-    elif insti_sum_2h < 0 and retail_sum_2h < 0:
-        signal = "🩸 HEAVY DUMP (All Selling)"
-        sig_color = "#b71c1c"
-
-    return {
-        "ticker": ticker,
-        "signal": signal,
-        "sig_color": sig_color,
-        "retail_2h": retail_sum_2h,
-        "insti_2h": insti_sum_2h,
-        "segments": data_points,
-        "timestamp": now.strftime("%H:%M UTC")
+    # Beregn trender ved å skjære i samme datasett (Macro)
+    trends = {
+        "90d": {"retail": calculate_cvd(macro_usdt, 90), "insti": calculate_cvd(macro_usdc, 90)},
+        "30d": {"retail": calculate_cvd(macro_usdt, 30), "insti": calculate_cvd(macro_usdc, 30)},
+        "7d":  {"retail": calculate_cvd(macro_usdt, 7),  "insti": calculate_cvd(macro_usdc, 7)},
+        "24h": {"retail": calculate_cvd(micro_usdt),     "insti": calculate_cvd(micro_usdc)} # Bruker micro for presisjon siste døgn
     }
+    
+    return {"ticker": ticker, "trends": trends}
 
 @app.get("/html/{ticker}", response_class=HTMLResponse)
-async def get_xray_html(ticker: str):
-    data = await analyze_xray_trend(ticker.upper())
+async def get_whale_dashboard(ticker: str):
+    data = await analyze_whale_trends(ticker.upper())
+    t = data["trends"]
     
-    rows = ""
-    for p in data["segments"]:
-        r_col = "red" if p["retail"] < 0 else "green"
-        i_col = "red" if p["insti"] < 0 else "green"
-        # Uthev Smart Money flow hvis den er stor og motsatt av retail
+    # Helper for å fargelegge tall
+    def fmt(val, is_insti=False):
+        color = "red" if val < 0 else "green"
+        # Hvis Institusjoner kjøper (+) og Retail selger (-), gjør det GULL (Bullish Divergence)
         bg = ""
-        if (p["insti"] > 0 and p["retail"] < 0) or (p["insti"] < 0 and p["retail"] > 0):
-            bg = "background: #fffde7;" # Highlight divergence
+        return f"<span style='color:{color}; font-weight:bold;'>${val/1_000_000:.1f}M</span>"
+
+    # Bygg HTML Dashboard
+    html = f"""
+    <html><body style="font-family: sans-serif; background: #f0f2f5; padding: 20px;">
+        <div style="background: white; padding: 20px; border-radius: 15px; box-shadow: 0 4px 15px rgba(0,0,0,0.1); max-width: 700px; margin: auto;">
+            <h2 style="text-align:center; margin-bottom: 5px;">🐋 {data['ticker']} Whale Hunter Dashboard</h2>
+            <p style="text-align:center; color:#666; font-size:12px; margin-top:0;">Smart Money (USDC) vs Retail (USDT)</p>
             
-        rows += f"""<tr style='{bg} border-bottom:1px solid #eee;'>
-            <td style='padding:8px; color:#888;'>{p['time']}</td>
-            <td style='padding:8px; font-weight:bold; color:{r_col};'>${p['retail']:,.0f}</td>
-            <td style='padding:8px; font-weight:bold; color:{i_col};'>${p['insti']:,.0f}</td>
-        </tr>"""
-
-    return f"""<html><body style="font-family: sans-serif; padding: 20px; background: #f5f5f5;">
-    <div style="background: #fff; padding: 25px; border-radius: 12px; max-width: 600px; margin: auto; box-shadow: 0 4px 12px rgba(0,0,0,0.1);">
-        <div style="display:flex; justify-content:space-between; align-items:center;">
-            <h1 style="margin:0;">🔍 {data['ticker']} X-Ray</h1>
-            <span style="color:#aaa; font-size:12px;">{data['timestamp']}</span>
-        </div>
+            <table style="width:100%; border-collapse: collapse; margin-top: 20px;">
+                <tr style="background:#fafafa; text-align:left; color:#888;">
+                    <th style="padding:10px;">Periode</th>
+                    <th style="padding:10px;">🛒 Retail (USDT)</th>
+                    <th style="padding:10px;">🏦 Smart Money (USDC)</th>
+                    <th style="padding:10px;">Signal</th>
+                </tr>
+    """
+    
+    labels = [("90 Dager (Macro)", "90d"), ("30 Dager (Måned)", "30d"), ("7 Dager (Uke)", "7d"), ("24 Timer (Micro)", "24h")]
+    
+    for label, key in labels:
+        ret = t[key]["retail"]
+        ins = t[key]["insti"]
         
-        <div style="margin:20px 0; padding:15px; background:{data['sig_color']}15; border-left:5px solid {data['sig_color']};">
-            <h3 style="margin:0; color:{data['sig_color']};">{data['signal']}</h3>
-        </div>
-
-        <div style="display:grid; grid-template-columns:1fr 1fr; gap:15px; margin-bottom:25px;">
-            <div style="text-align:center; padding:10px; background:#fafafa; border-radius:8px;">
-                <div style="font-size:12px; color:#666;">🛒 RETAIL (USDT) 2H</div>
-                <div style="font-size:18px; font-weight:bold; color:{'green' if data['retail_2h']>0 else 'red'}">${data['retail_2h']:,.0f}</div>
-            </div>
-            <div style="text-align:center; padding:10px; background:#fff8e1; border:1px solid #ffecb3; border-radius:8px;">
-                <div style="font-size:12px; color:#f57f17; font-weight:bold;">🏦 SMART MONEY (USDC) 2H</div>
-                <div style="font-size:18px; font-weight:bold; color:{'green' if data['insti_2h']>0 else 'red'}">${data['insti_2h']:,.0f}</div>
-            </div>
-        </div>
-
-        <table style="width:100%; text-align:right; border-collapse:collapse; font-size:14px;">
-            <tr style="background:#fafafa; color:#666;">
-                <th style="padding:10px; text-align:left;">Time</th>
-                <th style="padding:10px;">🛒 Retail Flow</th>
-                <th style="padding:10px;">🏦 Smart Flow</th>
+        # Tolk Signalet
+        sig = "Neutral"
+        bg_row = "white"
+        
+        if ins > 0 and ret < 0:
+            sig = "🐋 ACCUMULATION"
+            bg_row = "#e8f5e9" # Light green
+        elif ins < 0 and ret > 0:
+            sig = "⚠️ DISTRIBUTION"
+            bg_row = "#ffebee" # Light red
+        elif ins > 0 and ret > 0:
+            sig = "🚀 MOMENTUM"
+        elif ins < 0 and ret < 0:
+            sig = "🩸 DUMP"
+            
+        html += f"""
+            <tr style="border-bottom: 1px solid #eee; background: {bg_row};">
+                <td style="padding:12px;">{label}</td>
+                <td style="padding:12px;">{fmt(ret)}</td>
+                <td style="padding:12px;">{fmt(ins, True)}</td>
+                <td style="padding:12px; font-weight:bold; font-size:12px;">{sig}</td>
             </tr>
-            {rows}
-        </table>
-        <div style="margin-top:15px; font-size:11px; color:#999; text-align:center;">
-            Divergence (Yellow Rows) = High Value Signal
+        """
+        
+    html += """
+            </table>
+            <div style="margin-top:15px; font-size:11px; color:#999; text-align:center;">
+                Data source: Binance API (Taker Buy Volume). Analyzed across multiple timeframes instantly.
+            </div>
         </div>
-    </div></body></html>"""
+    </body></html>
+    """
+    return html
