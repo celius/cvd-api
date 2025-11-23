@@ -230,8 +230,8 @@ async def get_kline_analysis(session, symbol, interval, limit):
             r_ls = get_closest(ts, retail_map)
             
             # Labels
-            if interval == '15m': label = dt_obj.strftime("%H:%M")
-            elif interval == '1h': label = dt_obj.strftime("%H:00")
+            if interval == '15m': label = dt_obj.strftime("%d/%m %H:%M")
+            elif interval == '1h': label = dt_obj.strftime("%d/%m %H:00")
             elif interval == '1d': label = dt_obj.strftime("%Y-%m-%d")
             elif interval == '1w': label = f"Uke {dt_obj.strftime('%W')}"
             elif interval == '1M': label = dt_obj.strftime("%B")
@@ -282,20 +282,20 @@ def generate_html_page(symbol, monthly, weekly, daily, hourly, min15):
     <div class="coin-container" style="margin-bottom: 60px; background: #111; padding: 20px; border-radius: 8px; border: 1px solid #333;">
     <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom: 20px;">
     <h1 style="margin: 0; font-size: 2em;">{symbol.replace('USDT','')} Analysis</h1>
-    <div style="font-size: 0.8em; color: #666;">v8.1 Improved</div>
+    <div style="font-size: 0.8em; color: #666;">v8.1 Extended</div>
     </div>
     <style>
     table  width: 100%; border-collapse: collapse; font-size: 0.9em; margin-bottom: 30px; 
     th  text-align: left; padding: 8px; border-bottom: 2px solid #444; color: #aaa; text-transform: uppercase; font-size: 0.7em; 
     </style>
     
-    <h3 style="color: #00ccff; border-bottom: 1px solid #00ccff; padding-bottom: 5px;">⚡ Siste 4 Timer (Sniper)</h3>
+    <h3 style="color: #00ccff; border-bottom: 1px solid #00ccff; padding-bottom: 5px;">⚡ Siste 48 Timer - Kvarter (Sniper)</h3>
     <table><tr><th width="10%">Tid</th><th width="10%">Pris %</th><th width="15%">Spot CVD</th><th width="10%">🐋 Whale L/S</th><th width="10%">🐟 Retail L/S</th><th width="45%">Mode 7 Analyse</th></tr>{render_table_rows(min15)}</table>
     
-    <h3 style="color: #00ccff; border-bottom: 1px solid #00ccff; padding-bottom: 5px;">⏱️ Siste 24 Timer (Hourly)</h3>
+    <h3 style="color: #00ccff; border-bottom: 1px solid #00ccff; padding-bottom: 5px;">⏱️ Siste 7 Dager - Time (Hourly)</h3>
     <table><tr><th>Tid</th><th>Pris %</th><th>Spot CVD</th><th>🐋 Whale</th><th>🐟 Retail</th><th>Analyse</th></tr>{render_table_rows(hourly)}</table>
     
-    <h3 style="color: #00ccff; border-bottom: 1px solid #00ccff; padding-bottom: 5px;">📅 Siste 14 Dager (Daily)</h3>
+    <h3 style="color: #00ccff; border-bottom: 1px solid #00ccff; padding-bottom: 5px;">📅 Siste 30 Dager - Dag (Daily)</h3>
     <table><tr><th>Dato</th><th>Pris %</th><th>Spot CVD</th><th>🐋 Whale</th><th>🐟 Retail</th><th>Analyse</th></tr>{render_table_rows(daily)}</table>
     
     <h3 style="color: #00ccff; border-bottom: 1px solid #00ccff; padding-bottom: 5px;">📆 Siste 24 Uker (Weekly)</h3>
@@ -330,12 +330,12 @@ async def fetch_coin_data(session, sym):
     t_mon = get_kline_analysis(session, sym, "1M", 6)
     # 2. Weekly (24 uker)
     t_wek = get_kline_analysis(session, sym, "1w", 24)
-    # 3. Daily (14 dager)
-    t_day = get_kline_analysis(session, sym, "1d", 14)
-    # 4. Hourly (24 timer)
-    t_hor = get_kline_analysis(session, sym, "1h", 24)
-    # 5. 15-Min (4 timer)
-    t_min15 = get_kline_analysis(session, sym, "15m", 16)
+    # 3. Daily (30 dager)
+    t_day = get_kline_analysis(session, sym, "1d", 30)
+    # 4. Hourly (168 timer = 7 dager)
+    t_hor = get_kline_analysis(session, sym, "1h", 168)
+    # 5. 15-Min (192 intervaller = 48 timer)
+    t_min15 = get_kline_analysis(session, sym, "15m", 192)
     
     mon, wek, day, hor, min15 = await asyncio.gather(t_mon, t_wek, t_day, t_hor, t_min15)
     return generate_html_page(sym, mon, wek, day, hor, min15)
