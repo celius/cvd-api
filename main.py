@@ -5,7 +5,7 @@ import aiohttp
 import asyncio
 from datetime import datetime, timezone
 
-app = FastAPI(title="CVD API v8.1 - Whale vs Retail (Improved)", version="8.1")
+app = FastAPI(title="CVD API v8.1 - Whale vs Retail (Debug & Improved)", version="8.1")
 
 app.add_middleware(
     CORSMiddleware,
@@ -26,13 +26,14 @@ async def fetch_url(session, url):
         print(f"Error fetching {url}: {e}")
     return None
 
-# --- WHALE & RETAIL ANALYSIS ENGINE (v8.1 IMPROVED) ---
+# --- WHALE & RETAIL ANALYSIS ENGINE (v8.1 DEBUG & IMPROVED) ---
 def get_signal(price_ch, cvd_val, whale_ls, retail_ls):
     """
     v8.1 IMPROVED LOGIC:
     - Fix 1: Ekstrem Retail FOMO detection (>3.0 threshold)
     - Fix 2: Parabolic move detection (>20%)
-    - Bevarer HTML/CSS presentasjon
+    - Fix 3: Kontekst-bevisst analyse basert på pris-momentum
+    - Fix 4: Tidligere FAKE PUMP-varsling (>15% rally + negative CVD)
     """
     
     # Default
@@ -50,11 +51,18 @@ def get_signal(price_ch, cvd_val, whale_ls, retail_ls):
             col = "#8B0000"
         return head, desc, col
     
-    # PRIORITY 1: Ekstrem Retail FOMO (Fix 1 - ny threshold 3.0)
+    # NEW FIX 4: Momentum-divergence FAKE PUMP detection (earlier warning)
+    if price_ch > 15.0 and cvd_val < -20_000_000 and retail_ls > 2.5:
+        head = "⚠️ PARABOLIC RALLY MED DIVERGENCE"
+        desc = f"Pris +{price_ch:.1f}% men Spot CVD negativ ${cvd_val/1_000_000:.1f}M + Retail overleveraged ({retail_ls:.2f}) - Mulig FAKE PUMP som reverserer snart!"
+        col = "#ff6600"
+        return head, desc, col
+    
+    # PRIORITY 1: Ekstrem Retail FOMO (Fix 1 - threshold 3.0)
     if retail_ls > 3.0:
-        if cvd_val < -50_000_000:  # Fake pump intensity
+        if cvd_val < -50_000_000:  # Intense fake pump
             head = "🚨 FAKE PUMP + RETAIL FOMO PEAK"
-            desc = f"Retail ekstremt FOMO (L/S {retail_ls:.2f}), men Spot CVD svært negativ. Advarsel-topp!"
+            desc = f"Retail ekstremt FOMO (L/S {retail_ls:.2f}), men Spot CVD svært negativ ${cvd_val/1_000_000:.1f}M. Advarsel-topp!"
             col = "#ff0000"
         elif cvd_val < 0:
             head = "🚨 RETAIL FOMO PEAK"
@@ -66,12 +74,22 @@ def get_signal(price_ch, cvd_val, whale_ls, retail_ls):
             col = "#ffa500"
         return head, desc, col
     
-    # PRIORITY 2: Retail FOMO warning (2.0-3.0 range)
+    # PRIORITY 2: Retail FOMO warning (2.0-3.0 range) - NOW CONTEXT-AWARE
     if retail_ls > 2.0:
         if cvd_val < 0:
-            head = "⚠️ RETAIL FOMO + CVD NEGATIV"
-            desc = f"Retail overleveraged (L/S {retail_ls:.2f}), Spot CVD negativ - Mulig topp."
-            col = "#ff6b6b"
+            # Different messages based on price momentum
+            if price_ch > 5.0:  # Strong rally
+                head = "⚠️ RETAIL FOMO I STERK RALLY"
+                desc = f"Pris +{price_ch:.1f}%, Retail overleveraged (L/S {retail_ls:.2f}), Spot CVD negativ - Topp nærmer seg!"
+                col = "#ff6b6b"
+            elif price_ch < -5.0:  # Strong decline
+                head = "⚠️ RETAIL FOMO I BREAKDOWN"
+                desc = f"Pris {price_ch:.1f}%, Retail overleveraged (L/S {retail_ls:.2f}), Spot CVD negativ - Kapitulasjon fortsetter!"
+                col = "#ff4d4d"
+            else:  # Sideways
+                head = "⚠️ RETAIL FOMO + CVD NEGATIV"
+                desc = f"Retail overleveraged (L/S {retail_ls:.2f}), Spot CVD negativ - Mulig topp."
+                col = "#ff6b6b"
         else:
             head = "⚠️ RETAIL FOMO"
             desc = f"Retail L/S {retail_ls:.2f} - Crowd er overleveraged, vær forsiktig."
@@ -177,6 +195,9 @@ def get_signal(price_ch, cvd_val, whale_ls, retail_ls):
     return head, desc, col
 
 async def get_sentiment_history(session, symbol, period, limit, endpoint):
+    """
+    Henter sentiment history med DEBUG-logging for å oppdage frosne data
+    """
     # Mapping limits
     req_limit = limit
     if period == '1w': period = '1d'; req_limit = limit * 7
@@ -188,9 +209,23 @@ async def get_sentiment_history(session, symbol, period, limit, endpoint):
     
     res_map = {}
     if data:
+        # DEBUG: Check for frozen/identical data
+        ratios = [float(item['longShortRatio']) for item in data]
+        unique_ratios = set(ratios)
+        
+        if len(unique_ratios) == 1:
+            print(f"⚠️ DEBUG WARNING: All {endpoint} ratios are IDENTICAL ({ratios[0]:.2f}) for {symbol} - Data may be frozen!")
+        elif len(unique_ratios) < 3:
+            print(f"⚠️ DEBUG WARNING: Only {len(unique_ratios)} unique {endpoint} ratios for {symbol} - Low variance detected!")
+        else:
+            print(f"✅ DEBUG OK: {endpoint} has {len(unique_ratios)} unique ratios for {symbol} (healthy variance)")
+        
         for item in data:
             val = float(item['longShortRatio'])
             res_map[int(item['timestamp'])] = val
+    else:
+        print(f"❌ DEBUG ERROR: No data returned from {endpoint} for {symbol}")
+    
     return res_map
 
 def get_closest(ts, data_map):
@@ -282,7 +317,7 @@ def generate_html_page(symbol, monthly, weekly, daily, hourly, min15):
     <div class="coin-container" style="margin-bottom: 60px; background: #111; padding: 20px; border-radius: 8px; border: 1px solid #333;">
     <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom: 20px;">
     <h1 style="margin: 0; font-size: 2em;">{symbol.replace('USDT','')} Analysis</h1>
-    <div style="font-size: 0.8em; color: #666;">v8.1 Extended</div>
+    <div style="font-size: 0.8em; color: #666;">v8.1 Debug & Improved</div>
     </div>
     <style>
     table  width: 100%; border-collapse: collapse; font-size: 0.9em; margin-bottom: 30px; 
