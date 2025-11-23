@@ -5,7 +5,7 @@ import aiohttp
 import asyncio
 from datetime import datetime, timezone
 
-app = FastAPI(title="CVD API v8.2 - Actionable Analysis", version="8.2")
+app = FastAPI(title="CVD API v8.3 - Small-Cap Optimized", version="8.3")
 
 app.add_middleware(
     CORSMiddleware,
@@ -26,19 +26,32 @@ async def fetch_url(session, url):
         print(f"Error fetching {url}: {e}")
     return None
 
-# --- WHALE & RETAIL ANALYSIS ENGINE (v8.2 ACTIONABLE) ---
+# --- WHALE & RETAIL ANALYSIS ENGINE (v8.3 SMALL-CAP OPTIMIZED) ---
 def get_signal(price_ch, cvd_val, whale_ls, retail_ls):
     """
-    v8.2 ACTIONABLE ANALYSIS:
-    - CVD-aware parabolic signals (backed vs fake)
-    - Confidence scores for whale signals
-    - Entry/Exit guidance in breakdowns
-    - Multi-condition checks for capitulation
-    - Concrete numbers in all descriptions
+    v8.3 SMALL-CAP OPTIMIZATIONS:
+    - Fix 1: Low conviction / range-bound detection (reduce "NØYTRAL" spam)
+    - Fix 2: Relaxed thresholds for small-cap parabolic dumps
+    - Fix 3: Whale disinterest signal (both neutral)
+    - Fix 4: Symmetric whale logic (better handling of chronic short bias)
     """
     
     # Default
     head = "⚖️ NØYTRAL"; desc = "Ingen klare avvik."; col = "#888"
+    
+    # PRIORITY -1: Low Conviction Market (NEW in v8.3)
+    # When both whales and retail are neutral (0.8-1.2) + low CVD
+    if 0.8 <= whale_ls <= 1.2 and 0.8 <= retail_ls <= 1.2:
+        if abs(cvd_val) < 50_000 and abs(price_ch) < 0.5:
+            head = "💤 LOW CONVICTION"
+            desc = f"Range-bound: Whale {whale_ls:.2f}, Retail {retail_ls:.2f}, CVD ${cvd_val/1_000:+.0f}k. Ingen klare posisjoner - WAIT for setup."
+            col = "#666666"
+            return head, desc, col
+        elif abs(price_ch) < 0.3:
+            head = "⚖️ BALANSERT SENTIMENT"
+            desc = f"Nøytral posisjonering (Whale {whale_ls:.2f}, Retail {retail_ls:.2f}). Lav volatilitet, ingen edge."
+            col = "#888888"
+            return head, desc, col
     
     # PRIORITY 0: EXTREME PARABOLIC MOVES (>20%)
     if abs(price_ch) > 20:
@@ -57,27 +70,29 @@ def get_signal(price_ch, cvd_val, whale_ls, retail_ls):
                 desc = f"Ekstrem oppgang +{price_ch:.1f}% - Ofte FOMO-topp. Vurder take profit, CVD nøytral ${cvd_val/1_000_000:+.1f}M."
                 col = "#ff00ff"
         else:
-            # Parabolic DUMP - check capitulation conditions
+            # Parabolic DUMP - check capitulation conditions (RELAXED for small-caps)
             conditions_met = 0
             conditions_text = []
             
-            if retail_ls < 0.8:
+            # RELAXED: Retail < 1.0 instead of < 0.8 for small-caps
+            if retail_ls < 1.0:
                 conditions_met += 1
-                conditions_text.append("Retail L/S < 0.8 ✓")
+                conditions_text.append(f"Retail L/S {retail_ls:.2f} < 1.0 ✓")
             else:
-                conditions_text.append(f"Retail L/S {retail_ls:.2f} (need < 0.8)")
+                conditions_text.append(f"Retail L/S {retail_ls:.2f} (need < 1.0)")
             
             if cvd_val > 0:
                 conditions_met += 1
-                conditions_text.append("CVD positiv ✓")
+                conditions_text.append(f"CVD ${cvd_val/1_000_000:+.1f}M ✓")
             else:
                 conditions_text.append(f"CVD ${cvd_val/1_000_000:.1f}M (need positive)")
             
-            if whale_ls > 1.2:
+            # RELAXED: Whale > 1.0 instead of > 1.2 for small-caps
+            if whale_ls > 1.0:
                 conditions_met += 1
-                conditions_text.append("Whales Long ✓")
+                conditions_text.append(f"Whales Long {whale_ls:.2f} ✓")
             else:
-                conditions_text.append(f"Whale L/S {whale_ls:.2f} (need > 1.2)")
+                conditions_text.append(f"Whale L/S {whale_ls:.2f} (need > 1.0)")
             
             head = "💥 PARABOLIC DUMP"
             desc = f"Ekstrem nedgang {price_ch:.1f}% - Kapitulasjon! Entry conditions: {conditions_met}/3 met. "
@@ -86,6 +101,9 @@ def get_signal(price_ch, cvd_val, whale_ls, retail_ls):
             if conditions_met >= 2:
                 desc += " → CONSIDER staged entry."
                 col = "#00ff9d"
+            elif conditions_met == 1:
+                desc += " → WAIT for more confirmation."
+                col = "#ffa500"
             else:
                 desc += " → TOO EARLY, wait."
                 col = "#8B0000"
@@ -118,29 +136,28 @@ def get_signal(price_ch, cvd_val, whale_ls, retail_ls):
     # PRIORITY 3: Retail FOMO warning (2.0-3.0) - CONTEXT-AWARE with actionable guidance
     if retail_ls > 2.0:
         if cvd_val < 0:
-            if price_ch > 10.0:  # Strong rally
+            if price_ch > 10.0:
                 head = "⚠️ RETAIL FOMO I STERK RALLY"
                 desc = f"Pris +{price_ch:.1f}%, Retail overleveraged ({retail_ls:.2f}), CVD ${cvd_val/1_000_000:.1f}M negativ. TOPP nærmer seg - vurder take profit!"
                 col = "#ff6b6b"
-            elif price_ch > 5.0:  # Moderate rally
+            elif price_ch > 5.0:
                 head = "⚠️ RETAIL FOMO I RALLY"
                 desc = f"Pris +{price_ch:.1f}%, Retail {retail_ls:.2f}, CVD negativ. Svak oppgang - REDUCE long exposure."
                 col = "#ff8888"
-            elif price_ch < -10.0:  # Severe breakdown
-                # Check capitulation proximity
+            elif price_ch < -10.0:
                 if retail_ls < 2.3:
                     head = "⚠️ RETAIL FOMO I BREAKDOWN (LATE)"
-                    desc = f"Pris {price_ch:.1f}%, Retail L/S {retail_ls:.2f} synker (fra >2.5). CVD ${cvd_val/1_000_000:.1f}M. Kapitulasjon nærmer seg - WATCH for Retail < 0.8."
+                    desc = f"Pris {price_ch:.1f}%, Retail L/S {retail_ls:.2f} synker (fra >2.5). CVD ${cvd_val/1_000_000:.1f}M. Kapitulasjon nærmer seg - WATCH for Retail < 1.0."
                     col = "#ff9999"
                 else:
                     head = "⚠️ RETAIL FOMO I BREAKDOWN"
                     desc = f"Pris {price_ch:.1f}%, Retail {retail_ls:.2f} fortsatt høy, CVD ${cvd_val/1_000_000:.1f}M. Kapitulasjon pågår - WAIT, for tidlig!"
                     col = "#ff4d4d"
-            elif price_ch < -5.0:  # Moderate decline
+            elif price_ch < -5.0:
                 head = "⚠️ RETAIL FOMO I DECLINE"
                 desc = f"Pris {price_ch:.1f}%, Retail {retail_ls:.2f}, CVD negativ. Nedgang med svak sentiment - WAIT."
                 col = "#ff6b6b"
-            else:  # Sideways
+            else:
                 head = "⚠️ RETAIL FOMO + CVD NEGATIV"
                 desc = f"Retail overleveraged ({retail_ls:.2f}), CVD ${cvd_val/1_000_000:.1f}M. Mulig topp forming - REDUCE risk."
                 col = "#ff6b6b"
@@ -150,9 +167,9 @@ def get_signal(price_ch, cvd_val, whale_ls, retail_ls):
             col = "#ffa500"
         return head, desc, col
     
-    # PRIORITY 4: WHALE DIVERGENCE with confidence scoring
-    # Scenario 1: Whale Accumulation
-    if price_ch < -0.5 and whale_ls > 1.2:
+    # PRIORITY 4: WHALE DIVERGENCE with confidence scoring (IMPROVED for chronic short bias)
+    # Scenario 1: Whale Accumulation (or bullish positioning)
+    if price_ch < -0.5 and whale_ls > 1.0:  # RELAXED from 1.2 to 1.0
         conditions_met = 0
         confidence = []
         
@@ -168,37 +185,52 @@ def get_signal(price_ch, cvd_val, whale_ls, retail_ls):
             confidence.append(f"CVD ${cvd_val/1_000_000:.1f}M (no support)")
             col = "#0099ff"
         
-        # Check retail capitulation
-        if retail_ls < 0.8:
+        # Check retail capitulation (RELAXED from 0.8 to 1.0)
+        if retail_ls < 1.0:
             conditions_met += 1
             confidence.append(f"Retail {retail_ls:.2f} capitulating ✓")
-        elif retail_ls < 1.5:
+        elif retail_ls < 1.3:
             confidence.append(f"Retail {retail_ls:.2f} (neutral)")
         else:
             confidence.append(f"Retail {retail_ls:.2f} (still elevated)")
         
-        # Set signal based on confidence
-        if conditions_met >= 2:
+        # Bonus: Strong whale bullishness (>1.2)
+        if whale_ls > 1.2:
             head = "🐋 WHALE ACCUMULATION (HIGH CONVICTION)"
-            desc = f"Pris {price_ch:.1f}%, Whales loading Longs ({whale_ls:.2f}). {' | '.join(confidence)}. STRONG BUY signal!"
-        elif conditions_met == 1:
+            desc = f"Pris {price_ch:.1f}%, Whales STRONGLY Long ({whale_ls:.2f}). {' | '.join(confidence)}. STRONG BUY signal!"
+            col = "#00ff00"
+        elif conditions_met >= 2:
             head = "🐋 WHALE ACCUMULATION (CONFIRMED)"
             desc = f"Pris {price_ch:.1f}%, Whales accumulating ({whale_ls:.2f}). {' | '.join(confidence)}. CONSIDER entry."
+        elif conditions_met == 1:
+            head = "🐋 WHALE ACCUMULATION (EARLY)"
+            desc = f"Pris {price_ch:.1f}%, Whales L/S {whale_ls:.2f}. {' | '.join(confidence)}. WAIT for more confirmation."
+            col = "#0099ff"
         else:
             head = "🐋 WHALE ACCUMULATION (EARLY)"
             desc = f"Pris {price_ch:.1f}%, Whales L/S {whale_ls:.2f}. {' | '.join(confidence)}. TOO EARLY - wait for confirmation."
+            col = "#0088cc"
         
         return head, desc, col
     
-    # Scenario 2: Whale Distribution
-    elif price_ch > 0.5 and whale_ls < 0.8:
+    # Scenario 2: Whale Distribution (or bearish positioning)
+    elif price_ch > 0.5 and whale_ls < 0.9:  # RELAXED from 0.8 to 0.9
         head = "🐋 WHALE DISTRIBUTION"
-        desc = f"Pris +{price_ch:.1f}%, men Whales shorting ({whale_ls:.2f}). "
+        desc = f"Pris +{price_ch:.1f}%, men Whales "
         col = "#ff4d4d"
+        
+        # Strong bearish whale positioning
+        if whale_ls < 0.8:
+            desc += f"STRONGLY shorting ({whale_ls:.2f}). "
+            col = "#ff0000"
+        else:
+            desc += f"shorting ({whale_ls:.2f}). "
         
         if cvd_val < -10_000_000:
             desc += f"CVD ${cvd_val/1_000_000:.1f}M confirms. EXIT longs!"
             col = "#ff0000"
+        elif cvd_val < 0:
+            desc += f"CVD ${cvd_val/1_000_000:.1f}M negative. REDUCE exposure."
         else:
             desc += f"CVD ${cvd_val/1_000_000:+.1f}M mixed signal. REDUCE exposure."
         
@@ -208,8 +240,15 @@ def get_signal(price_ch, cvd_val, whale_ls, retail_ls):
         
         return head, desc, col
     
-    # PRIORITY 5: RETAIL CONTRARIAN - Capitulation with entry guidance
-    if retail_ls < 0.8:
+    # NEW v8.3: Whale Disinterest (chronic short bias but not distributing)
+    elif whale_ls < 0.9 and abs(price_ch) < 1.0:
+        head = "⚠️ WHALE DISINTEREST"
+        desc = f"Whales short-biased ({whale_ls:.2f}) men pris flat {price_ch:+.1f}%. Lav conviction - WAIT for clear direction."
+        col = "#999999"
+        return head, desc, col
+    
+    # PRIORITY 5: RETAIL CONTRARIAN - Capitulation with entry guidance (RELAXED thresholds)
+    if retail_ls < 1.0:  # RELAXED from 0.8
         conditions_met = 0
         entry_check = []
         
@@ -225,24 +264,36 @@ def get_signal(price_ch, cvd_val, whale_ls, retail_ls):
         else:
             entry_check.append(f"CVD ${cvd_val/1_000_000:.1f}M (wait for positive)")
         
-        if whale_ls > 1.2:
+        if whale_ls > 1.0:  # RELAXED from 1.2
             conditions_met += 1
             entry_check.append(f"Whales Long {whale_ls:.2f} ✓")
         else:
             entry_check.append(f"Whales {whale_ls:.2f} (neutral)")
         
-        if conditions_met >= 2:
-            head = "✅ RETAIL CAPITULATION (HIGH CONVICTION)"
-            desc = f"Retail panikk (L/S {retail_ls:.2f}). {' | '.join(entry_check)}. STRONG BUY zone - staged entry!"
-            col = "#00ff9d"
-        elif cvd_val > 0:
-            head = "✅ RETAIL CAPITULATION + SPOT SUPPORT"
-            desc = f"Retail panikk ({retail_ls:.2f}), CVD ${cvd_val/1_000_000:+.1f}M. {' | '.join(entry_check)}. CONSIDER entry."
-            col = "#00ccff"
+        # Extra strong signal if retail < 0.8 (true capitulation)
+        if retail_ls < 0.8:
+            if conditions_met >= 2:
+                head = "✅ RETAIL CAPITULATION (HIGH CONVICTION)"
+                desc = f"Retail EXTREME panikk (L/S {retail_ls:.2f}). {' | '.join(entry_check)}. STRONG BUY zone - staged entry!"
+                col = "#00ff9d"
+            elif cvd_val > 0:
+                head = "✅ RETAIL CAPITULATION + SPOT SUPPORT"
+                desc = f"Retail extreme panikk ({retail_ls:.2f}), CVD ${cvd_val/1_000_000:+.1f}M. {' | '.join(entry_check)}. CONSIDER entry."
+                col = "#00ccff"
+            else:
+                head = "⚠️ RETAIL CAPITULATION (EARLY)"
+                desc = f"Retail extreme panikk ({retail_ls:.2f}), men CVD ${cvd_val/1_000_000:.1f}M negativ. {' | '.join(entry_check)}. Wait for CVD confirmation."
+                col = "#ffa500"
         else:
-            head = "⚠️ RETAIL CAPITULATION (EARLY)"
-            desc = f"Retail panikk ({retail_ls:.2f}), men CVD ${cvd_val/1_000_000:.1f}M negativ. {' | '.join(entry_check)}. Wait for CVD confirmation."
-            col = "#ffa500"
+            # Moderate capitulation (0.8 < retail < 1.0)
+            if conditions_met >= 2:
+                head = "✅ RETAIL NEUTRAL → FEAR"
+                desc = f"Retail nøytral til bear ({retail_ls:.2f}). {' | '.join(entry_check)}. Early reversal setup - WATCH closely."
+                col = "#00cccc"
+            else:
+                head = "⚖️ RETAIL NØYTRAL"
+                desc = f"Retail balanced ({retail_ls:.2f}). {' | '.join(entry_check)}. No clear edge yet."
+                col = "#888888"
         
         return head, desc, col
     
@@ -295,7 +346,7 @@ def get_signal(price_ch, cvd_val, whale_ls, retail_ls):
             col = "#ffcccc"
         return head, desc, col
     
-    # NEUTRAL: Ingen klare signaler
+    # NEUTRAL: Ingen klare signaler (but now much less common)
     return head, desc, col
 
 async def get_sentiment_history(session, symbol, period, limit, endpoint):
@@ -395,11 +446,11 @@ def render_table_rows(rows):
         else: cvd_fmt = f"${r['cvd']/1_000:+.0f}k"
         cvd_col = "#00ff9d" if r['cvd'] >= 0 else "#ff4d4d"
         
-        # Whale Color: Green if Long Bias (>1.2), Red if Short Bias (<0.8)
-        w_col = "#00ff9d" if r['w_ls'] > 1.2 else ("#ff4d4d" if r['w_ls'] < 0.8 else "#aaa")
+        # Whale Color: Green if Long Bias (>1.0), Red if Short Bias (<0.9), Gray neutral
+        w_col = "#00ff9d" if r['w_ls'] > 1.0 else ("#ff4d4d" if r['w_ls'] < 0.9 else "#aaa")
         
-        # Retail Color: Red if overly Long (>2.0 - contrarian), Green if Fearful (<0.8)
-        r_col = "#ff4d4d" if r['r_ls'] > 2.0 else ("#00ff9d" if r['r_ls'] < 0.8 else "#aaa")
+        # Retail Color: Red if overly Long (>2.0 - contrarian), Green if Fearful (<1.0), Gray neutral
+        r_col = "#ff4d4d" if r['r_ls'] > 2.0 else ("#00ff9d" if r['r_ls'] < 1.0 else "#aaa")
         
         html += f"""
         <tr style="border-bottom: 1px solid #222;">
@@ -421,7 +472,7 @@ def generate_html_page(symbol, monthly, weekly, daily, hourly, min15):
     <div class="coin-container" style="margin-bottom: 60px; background: #111; padding: 20px; border-radius: 8px; border: 1px solid #333;">
     <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom: 20px;">
     <h1 style="margin: 0; font-size: 2em;">{symbol.replace('USDT','')} Analysis</h1>
-    <div style="font-size: 0.8em; color: #666;">v8.2 Actionable</div>
+    <div style="font-size: 0.8em; color: #666;">v8.3 Small-Cap</div>
     </div>
     <style>
     table  width: 100%; border-collapse: collapse; font-size: 0.9em; margin-bottom: 30px; 
