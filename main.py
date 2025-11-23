@@ -5,7 +5,7 @@ import aiohttp
 import asyncio
 from datetime import datetime, timezone
 
-app = FastAPI(title="CVD API v8.1 - Whale vs Retail (Debug & Improved)", version="8.1")
+app = FastAPI(title="CVD API v8.2 - Actionable Analysis", version="8.2")
 
 app.add_middleware(
     CORSMiddleware,
@@ -26,145 +26,249 @@ async def fetch_url(session, url):
         print(f"Error fetching {url}: {e}")
     return None
 
-# --- WHALE & RETAIL ANALYSIS ENGINE (v8.1 DEBUG & IMPROVED) ---
+# --- WHALE & RETAIL ANALYSIS ENGINE (v8.2 ACTIONABLE) ---
 def get_signal(price_ch, cvd_val, whale_ls, retail_ls):
     """
-    v8.1 IMPROVED LOGIC:
-    - Fix 1: Ekstrem Retail FOMO detection (>3.0 threshold)
-    - Fix 2: Parabolic move detection (>20%)
-    - Fix 3: Kontekst-bevisst analyse basert på pris-momentum
-    - Fix 4: Tidligere FAKE PUMP-varsling (>15% rally + negative CVD)
+    v8.2 ACTIONABLE ANALYSIS:
+    - CVD-aware parabolic signals (backed vs fake)
+    - Confidence scores for whale signals
+    - Entry/Exit guidance in breakdowns
+    - Multi-condition checks for capitulation
+    - Concrete numbers in all descriptions
     """
     
     # Default
     head = "⚖️ NØYTRAL"; desc = "Ingen klare avvik."; col = "#888"
     
-    # EDGE CASE: Parabolic moves (Fix 2)
+    # PRIORITY 0: EXTREME PARABOLIC MOVES (>20%)
     if abs(price_ch) > 20:
         if price_ch > 0:
-            head = "🚀 PARABOLIC PUMP"
-            desc = "Ekstrem oppgang (+20%+) - Ofte FOMO-topp, vurder take profit."
-            col = "#ff00ff"
+            # Parabolic PUMP - check CVD backing
+            if cvd_val > 50_000_000:
+                head = "🚀 PARABOLIC RALLY (BACKED)"
+                desc = f"Ekstrem oppgang +{price_ch:.1f}% MED stor Spot CVD ${cvd_val/1_000_000:+.1f}M. Legitimt momentum, men vurder profit på ekstreme nivåer."
+                col = "#00ff00"
+            elif cvd_val < -20_000_000:
+                head = "⚠️ PARABOLIC FAKE PUMP"
+                desc = f"Ekstrem oppgang +{price_ch:.1f}% men CVD negativ ${cvd_val/1_000_000:.1f}M! Retail L/S {retail_ls:.2f}. Reversal imminent - EXIT!"
+                col = "#ff6600"
+            else:
+                head = "🚀 PARABOLIC PUMP"
+                desc = f"Ekstrem oppgang +{price_ch:.1f}% - Ofte FOMO-topp. Vurder take profit, CVD nøytral ${cvd_val/1_000_000:+.1f}M."
+                col = "#ff00ff"
         else:
+            # Parabolic DUMP - check capitulation conditions
+            conditions_met = 0
+            conditions_text = []
+            
+            if retail_ls < 0.8:
+                conditions_met += 1
+                conditions_text.append("Retail L/S < 0.8 ✓")
+            else:
+                conditions_text.append(f"Retail L/S {retail_ls:.2f} (need < 0.8)")
+            
+            if cvd_val > 0:
+                conditions_met += 1
+                conditions_text.append("CVD positiv ✓")
+            else:
+                conditions_text.append(f"CVD ${cvd_val/1_000_000:.1f}M (need positive)")
+            
+            if whale_ls > 1.2:
+                conditions_met += 1
+                conditions_text.append("Whales Long ✓")
+            else:
+                conditions_text.append(f"Whale L/S {whale_ls:.2f} (need > 1.2)")
+            
             head = "💥 PARABOLIC DUMP"
-            desc = "Ekstrem nedgang (-20%+) - Ekstremt salgspress, vurder capitulation-kjøp."
-            col = "#8B0000"
+            desc = f"Ekstrem nedgang {price_ch:.1f}% - Kapitulasjon! Entry conditions: {conditions_met}/3 met. "
+            desc += " | ".join(conditions_text)
+            
+            if conditions_met >= 2:
+                desc += " → CONSIDER staged entry."
+                col = "#00ff9d"
+            else:
+                desc += " → TOO EARLY, wait."
+                col = "#8B0000"
+        
         return head, desc, col
     
-    # NEW FIX 4: Momentum-divergence FAKE PUMP detection (earlier warning)
+    # PRIORITY 1: Momentum-divergence FAKE PUMP detection (15%+ rally with negative CVD)
     if price_ch > 15.0 and cvd_val < -20_000_000 and retail_ls > 2.5:
-        head = "⚠️ PARABOLIC RALLY MED DIVERGENCE"
-        desc = f"Pris +{price_ch:.1f}% men Spot CVD negativ ${cvd_val/1_000_000:.1f}M + Retail overleveraged ({retail_ls:.2f}) - Mulig FAKE PUMP som reverserer snart!"
+        head = "⚠️ PARABOLIC RALLY (DIVERGENCE)"
+        desc = f"Pris +{price_ch:.1f}% men CVD ${cvd_val/1_000_000:.1f}M negativ + Retail overleveraged ({retail_ls:.2f}). FAKE PUMP reverserer snart - EXIT positions!"
         col = "#ff6600"
         return head, desc, col
     
-    # PRIORITY 1: Ekstrem Retail FOMO (Fix 1 - threshold 3.0)
+    # PRIORITY 2: Extreme Retail FOMO (>3.0 threshold)
     if retail_ls > 3.0:
-        if cvd_val < -50_000_000:  # Intense fake pump
+        if cvd_val < -50_000_000:
             head = "🚨 FAKE PUMP + RETAIL FOMO PEAK"
-            desc = f"Retail ekstremt FOMO (L/S {retail_ls:.2f}), men Spot CVD svært negativ ${cvd_val/1_000_000:.1f}M. Advarsel-topp!"
+            desc = f"Retail ekstremt FOMO (L/S {retail_ls:.2f}), CVD svært negativ ${cvd_val/1_000_000:.1f}M. ADVARSEL-TOPP - EXIT all longs!"
             col = "#ff0000"
         elif cvd_val < 0:
             head = "🚨 RETAIL FOMO PEAK"
-            desc = f"Retail ekstremt overleveraged Long (L/S {retail_ls:.2f}) + Spot CVD negativ. Sannsynlig topp."
+            desc = f"Retail ekstremt overleveraged Long (L/S {retail_ls:.2f}) + CVD negativ ${cvd_val/1_000_000:.1f}M. Sannsynlig topp - REDUCE exposure!"
             col = "#ff4d4d"
         else:
             head = "⚠️ RETAIL FOMO EKSTREMT"
-            desc = f"Retail L/S {retail_ls:.2f} (>3.0) - Vær varsom, crowd er overleveraged Long."
+            desc = f"Retail L/S {retail_ls:.2f} (>3.0 threshold). Crowd overleveraged Long. CVD ${cvd_val/1_000_000:+.1f}M støtter nå, men vær varsom."
             col = "#ffa500"
         return head, desc, col
     
-    # PRIORITY 2: Retail FOMO warning (2.0-3.0 range) - NOW CONTEXT-AWARE
+    # PRIORITY 3: Retail FOMO warning (2.0-3.0) - CONTEXT-AWARE with actionable guidance
     if retail_ls > 2.0:
         if cvd_val < 0:
-            # Different messages based on price momentum
-            if price_ch > 5.0:  # Strong rally
+            if price_ch > 10.0:  # Strong rally
                 head = "⚠️ RETAIL FOMO I STERK RALLY"
-                desc = f"Pris +{price_ch:.1f}%, Retail overleveraged (L/S {retail_ls:.2f}), Spot CVD negativ - Topp nærmer seg!"
+                desc = f"Pris +{price_ch:.1f}%, Retail overleveraged ({retail_ls:.2f}), CVD ${cvd_val/1_000_000:.1f}M negativ. TOPP nærmer seg - vurder take profit!"
                 col = "#ff6b6b"
-            elif price_ch < -5.0:  # Strong decline
-                head = "⚠️ RETAIL FOMO I BREAKDOWN"
-                desc = f"Pris {price_ch:.1f}%, Retail overleveraged (L/S {retail_ls:.2f}), Spot CVD negativ - Kapitulasjon fortsetter!"
-                col = "#ff4d4d"
+            elif price_ch > 5.0:  # Moderate rally
+                head = "⚠️ RETAIL FOMO I RALLY"
+                desc = f"Pris +{price_ch:.1f}%, Retail {retail_ls:.2f}, CVD negativ. Svak oppgang - REDUCE long exposure."
+                col = "#ff8888"
+            elif price_ch < -10.0:  # Severe breakdown
+                # Check capitulation proximity
+                if retail_ls < 2.3:
+                    head = "⚠️ RETAIL FOMO I BREAKDOWN (LATE)"
+                    desc = f"Pris {price_ch:.1f}%, Retail L/S {retail_ls:.2f} synker (fra >2.5). CVD ${cvd_val/1_000_000:.1f}M. Kapitulasjon nærmer seg - WATCH for Retail < 0.8."
+                    col = "#ff9999"
+                else:
+                    head = "⚠️ RETAIL FOMO I BREAKDOWN"
+                    desc = f"Pris {price_ch:.1f}%, Retail {retail_ls:.2f} fortsatt høy, CVD ${cvd_val/1_000_000:.1f}M. Kapitulasjon pågår - WAIT, for tidlig!"
+                    col = "#ff4d4d"
+            elif price_ch < -5.0:  # Moderate decline
+                head = "⚠️ RETAIL FOMO I DECLINE"
+                desc = f"Pris {price_ch:.1f}%, Retail {retail_ls:.2f}, CVD negativ. Nedgang med svak sentiment - WAIT."
+                col = "#ff6b6b"
             else:  # Sideways
                 head = "⚠️ RETAIL FOMO + CVD NEGATIV"
-                desc = f"Retail overleveraged (L/S {retail_ls:.2f}), Spot CVD negativ - Mulig topp."
+                desc = f"Retail overleveraged ({retail_ls:.2f}), CVD ${cvd_val/1_000_000:.1f}M. Mulig topp forming - REDUCE risk."
                 col = "#ff6b6b"
         else:
             head = "⚠️ RETAIL FOMO"
-            desc = f"Retail L/S {retail_ls:.2f} - Crowd er overleveraged, vær forsiktig."
+            desc = f"Retail L/S {retail_ls:.2f} overleveraged. CVD ${cvd_val/1_000_000:+.1f}M støtter nå, men crowd positioning ekstrem - vær forsiktig."
             col = "#ffa500"
         return head, desc, col
     
-    # PRIORITY 3: WHALE DIVERGENCE (Most Powerful)
+    # PRIORITY 4: WHALE DIVERGENCE with confidence scoring
     # Scenario 1: Whale Accumulation
     if price_ch < -0.5 and whale_ls > 1.2:
-        head = "🐋 WHALE ACCUMULATION"
-        desc = "Pris faller, men Whales laster opp Longs. Bullish divergens."
-        col = "#00ccff"
-        if cvd_val > 0:
-            desc += " Spot CVD positiv (sterk)."
-            col = "#00ff9d"  # Super Bullish
+        conditions_met = 0
+        confidence = []
+        
+        # Check CVD support
+        if cvd_val > 10_000_000:
+            conditions_met += 1
+            confidence.append(f"CVD ${cvd_val/1_000_000:+.1f}M ✓")
+            col = "#00ff9d"
+        elif cvd_val > 0:
+            confidence.append(f"CVD ${cvd_val/1_000_000:+.1f}M (weak)")
+            col = "#00ccff"
         else:
-            desc += " Men Spot CVD negativ (svekkelse, vær forsiktig)."
+            confidence.append(f"CVD ${cvd_val/1_000_000:.1f}M (no support)")
             col = "#0099ff"
+        
+        # Check retail capitulation
         if retail_ls < 0.8:
-            desc += " Retail har panikk (Capitulation)."
-            col = "#00ff9d"  # Super Bullish
+            conditions_met += 1
+            confidence.append(f"Retail {retail_ls:.2f} capitulating ✓")
+        elif retail_ls < 1.5:
+            confidence.append(f"Retail {retail_ls:.2f} (neutral)")
+        else:
+            confidence.append(f"Retail {retail_ls:.2f} (still elevated)")
+        
+        # Set signal based on confidence
+        if conditions_met >= 2:
+            head = "🐋 WHALE ACCUMULATION (HIGH CONVICTION)"
+            desc = f"Pris {price_ch:.1f}%, Whales loading Longs ({whale_ls:.2f}). {' | '.join(confidence)}. STRONG BUY signal!"
+        elif conditions_met == 1:
+            head = "🐋 WHALE ACCUMULATION (CONFIRMED)"
+            desc = f"Pris {price_ch:.1f}%, Whales accumulating ({whale_ls:.2f}). {' | '.join(confidence)}. CONSIDER entry."
+        else:
+            head = "🐋 WHALE ACCUMULATION (EARLY)"
+            desc = f"Pris {price_ch:.1f}%, Whales L/S {whale_ls:.2f}. {' | '.join(confidence)}. TOO EARLY - wait for confirmation."
+        
         return head, desc, col
     
     # Scenario 2: Whale Distribution
     elif price_ch > 0.5 and whale_ls < 0.8:
         head = "🐋 WHALE DISTRIBUTION"
-        desc = "Pris stiger, men Whales shorter. Bearish divergens."
+        desc = f"Pris +{price_ch:.1f}%, men Whales shorting ({whale_ls:.2f}). "
         col = "#ff4d4d"
-        if cvd_val < 0:
-            desc += " Spot CVD negativ (sterk)."
-            col = "#ff0000"  # Super Bearish
+        
+        if cvd_val < -10_000_000:
+            desc += f"CVD ${cvd_val/1_000_000:.1f}M confirms. EXIT longs!"
+            col = "#ff0000"
         else:
-            desc += " Men Spot CVD positiv (motsetning)."
-            col = "#ff6b6b"
+            desc += f"CVD ${cvd_val/1_000_000:+.1f}M mixed signal. REDUCE exposure."
+        
         if retail_ls > 2.0:
-            desc += " Retail fomo-kjøper toppen."
-            col = "#ff0000"  # Super Bearish
+            desc += f" Retail FOMO ({retail_ls:.2f}) buying top."
+            col = "#ff0000"
+        
         return head, desc, col
     
-    # PRIORITY 4: RETAIL CONTRARIAN
-    # Retail Capitulation
-    if retail_ls < 0.8 and price_ch < -0.5:
-        if cvd_val > 0:
-            head = "✅ RETAIL CAPITULATION + SPOT SUPPORT"
-            desc = f"Retail panikk (L/S {retail_ls:.2f}), men Spot CVD positiv - Mulig bunn."
-            col = "#00ff9d"
+    # PRIORITY 5: RETAIL CONTRARIAN - Capitulation with entry guidance
+    if retail_ls < 0.8:
+        conditions_met = 0
+        entry_check = []
+        
+        if price_ch < -0.5:
+            conditions_met += 1
+            entry_check.append("Price declining ✓")
         else:
-            head = "⚠️ RETAIL CAPITULATION"
-            desc = f"Retail panikk (L/S {retail_ls:.2f}), men Spot CVD negativ - Fortsatt salgspress."
+            entry_check.append(f"Price +{price_ch:.1f}% (wait for dip)")
+        
+        if cvd_val > 0:
+            conditions_met += 1
+            entry_check.append(f"CVD ${cvd_val/1_000_000:+.1f}M ✓")
+        else:
+            entry_check.append(f"CVD ${cvd_val/1_000_000:.1f}M (wait for positive)")
+        
+        if whale_ls > 1.2:
+            conditions_met += 1
+            entry_check.append(f"Whales Long {whale_ls:.2f} ✓")
+        else:
+            entry_check.append(f"Whales {whale_ls:.2f} (neutral)")
+        
+        if conditions_met >= 2:
+            head = "✅ RETAIL CAPITULATION (HIGH CONVICTION)"
+            desc = f"Retail panikk (L/S {retail_ls:.2f}). {' | '.join(entry_check)}. STRONG BUY zone - staged entry!"
+            col = "#00ff9d"
+        elif cvd_val > 0:
+            head = "✅ RETAIL CAPITULATION + SPOT SUPPORT"
+            desc = f"Retail panikk ({retail_ls:.2f}), CVD ${cvd_val/1_000_000:+.1f}M. {' | '.join(entry_check)}. CONSIDER entry."
+            col = "#00ccff"
+        else:
+            head = "⚠️ RETAIL CAPITULATION (EARLY)"
+            desc = f"Retail panikk ({retail_ls:.2f}), men CVD ${cvd_val/1_000_000:.1f}M negativ. {' | '.join(entry_check)}. Wait for CVD confirmation."
             col = "#ffa500"
+        
         return head, desc, col
     
-    # PRIORITY 5: SPOT CVD CONFIRMATION (Hvis ingen stor whale/retail divergens)
+    # PRIORITY 6: SPOT CVD CONFIRMATION (strong moves)
     if price_ch > 2.0 and cvd_val > 50_000_000:
         head = "✅ SPOT DRIVER"
-        desc = "Sterk oppgang med stor Spot CVD - Sunn trend."
+        desc = f"Oppgang +{price_ch:.1f}% med stor Spot CVD ${cvd_val/1_000_000:+.1f}M. Sunn trend - HOLD positions."
         col = "#00ff9d"
         return head, desc, col
     
     if price_ch < -2.0 and cvd_val < -50_000_000:
         head = "❌ SPOT DUMP"
-        desc = "Sterk nedgang med stor Spot CVD utstrømming."
+        desc = f"Nedgang {price_ch:.1f}% med stor CVD utstrømming ${cvd_val/1_000_000:.1f}M. Aggressivt salg - EXIT."
         col = "#ff4d4d"
         return head, desc, col
     
     # Spot absorption (reversal setup)
     if price_ch < -1.0 and cvd_val > 10_000_000:
         head = "🛡️ SPOT ABSORBERING"
-        desc = "Pris ned men CVD opp - Mulig reversal."
+        desc = f"Pris {price_ch:.1f}% ned men CVD ${cvd_val/1_000_000:+.1f}M positiv. Reversal-setup - WATCH for bounce."
         col = "#0099ff"
         return head, desc, col
     
     if price_ch > 1.0 and cvd_val < -10_000_000:
         head = "⚠️ SVAK OPPGANG"
-        desc = "Pris opp men CVD negativ - Mangler kjøpere, mulig felle."
+        desc = f"Pris +{price_ch:.1f}% men CVD ${cvd_val/1_000_000:.1f}M negativ. Mangler kjøpere - mulig felle, REDUCE longs."
         col = "#ffa500"
         return head, desc, col
     
@@ -172,22 +276,22 @@ def get_signal(price_ch, cvd_val, whale_ls, retail_ls):
     if price_ch > 0.5:
         if cvd_val > 0:
             head = "🚀 SUNN OPPGANG"
-            desc = "Pris opp støttet av Spot-kjøp."
+            desc = f"Pris +{price_ch:.1f}% støttet av CVD ${cvd_val/1_000_000:+.1f}M. Retail {retail_ls:.2f}. Trend-following OK."
             col = "#00ff9d"
         else:
             head = "⚠️ SVAK OPPGANG"
-            desc = "Pris opp, men Spot selger (mulig felle)."
+            desc = f"Pris +{price_ch:.1f}%, men CVD ${cvd_val/1_000_000:.1f}M negativ. Retail {retail_ls:.2f}. Svak - vær varsom."
             col = "#ffa500"
         return head, desc, col
     
     if price_ch < -0.5:
         if cvd_val > 0:
             head = "🛡️ SPOT ABSORBERING"
-            desc = "Pris ned, men Spot kjøper imot."
+            desc = f"Pris {price_ch:.1f}% ned, men CVD ${cvd_val/1_000_000:+.1f}M kjøper imot. Mulig bunn."
             col = "#0099ff"
         else:
             head = "📉 AGGRESSIVT SALG"
-            desc = "Pris ned støttet av Spot-salg."
+            desc = f"Pris {price_ch:.1f}% ned støttet av CVD ${cvd_val/1_000_000:.1f}M. Retail {retail_ls:.2f}. Continued weakness."
             col = "#ffcccc"
         return head, desc, col
     
@@ -317,7 +421,7 @@ def generate_html_page(symbol, monthly, weekly, daily, hourly, min15):
     <div class="coin-container" style="margin-bottom: 60px; background: #111; padding: 20px; border-radius: 8px; border: 1px solid #333;">
     <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom: 20px;">
     <h1 style="margin: 0; font-size: 2em;">{symbol.replace('USDT','')} Analysis</h1>
-    <div style="font-size: 0.8em; color: #666;">v8.1 Debug & Improved</div>
+    <div style="font-size: 0.8em; color: #666;">v8.2 Actionable</div>
     </div>
     <style>
     table  width: 100%; border-collapse: collapse; font-size: 0.9em; margin-bottom: 30px; 
